@@ -26,6 +26,23 @@ from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_st
 
 logger = get_logger()
 
+HEADERS_TO_STRIP = frozenset({
+    'X-Forwarded-For',
+    'X-Forwarded-Host',
+    'X-Forwarded-Proto',
+    'X-Real-IP',
+    'Forwarded',
+    'Via',
+    'True-Client-IP',
+    'X-Client-IP',
+})
+
+def build_upstream_headers(base_headers: dict) -> dict:
+    return {
+        k: v for k, v in base_headers.items()
+        if k not in HEADERS_TO_STRIP
+    }
+
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
@@ -140,10 +157,11 @@ class StreamManager:
         session = requests.Session()
 
         # Configure session headers
-        session.headers.update({
+        base_headers = {
             'User-Agent': self.user_agent,
             'Connection': 'keep-alive'
-        })
+        }
+        session.headers.update(build_upstream_headers(base_headers))
 
         # Set up connection pooling for better performance
         adapter = requests.adapters.HTTPAdapter(

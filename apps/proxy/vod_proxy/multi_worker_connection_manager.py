@@ -24,6 +24,23 @@ from apps.m3u.models import M3UAccountProfile
 logger = logging.getLogger("vod_proxy")
 
 
+HEADERS_TO_STRIP = frozenset({
+    'X-Forwarded-For',
+    'X-Forwarded-Host',
+    'X-Forwarded-Proto',
+    'X-Real-IP',
+    'Forwarded',
+    'Via',
+    'True-Client-IP',
+    'X-Client-IP',
+})
+
+def build_upstream_headers(base_headers: dict) -> dict:
+    return {
+        k: v for k, v in base_headers.items()
+        if k not in HEADERS_TO_STRIP
+    }
+
 class ProviderConnectionLimitError(Exception):
     """Raised when the IPTV provider returns HTTP 458 (max connections reached)."""
     pass
@@ -915,6 +932,8 @@ class MultiWorkerVODConnectionManager:
                     django_header = f'HTTP_{header_name.upper().replace("-", "_")}'
                     if hasattr(request, 'META') and django_header in request.META:
                         headers[header_name] = request.META[django_header]
+                
+                headers = build_upstream_headers(headers)
 
                 # Create connection state in Redis with consolidated session metadata
                 if not redis_connection.create_connection(
