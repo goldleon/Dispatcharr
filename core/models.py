@@ -54,6 +54,11 @@ class StreamProfile(models.Model):
     is_active = models.BooleanField(
         default=True, help_text="Whether this profile is active"
     )
+    ssl_verify = models.BooleanField(
+        default=True,
+        help_text="Verify SSL certificates when connecting to provider. "
+                  "Disable for providers with self-signed or expired certificates."
+    )
     user_agent = models.ForeignKey(
         "UserAgent",
         on_delete=models.SET_NULL,

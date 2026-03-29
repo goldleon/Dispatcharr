@@ -104,12 +104,16 @@ class StreamManager:
 
         logger.info(f"Initialized stream manager for channel {buffer.channel_id}")
 
-        # Cache channel name to avoid repeated DB queries in hot paths
+        # Cache channel name and SSL verify setting to avoid repeated DB queries in hot paths
         try:
             _channel_obj = Channel.objects.get(uuid=channel_id)
             self.channel_name = _channel_obj.name
+            # Cache ssl_verify from the channel's stream profile
+            _stream_profile = _channel_obj.get_stream_profile()
+            self.ssl_verify = getattr(_stream_profile, 'ssl_verify', True)
         except Exception:
             self.channel_name = str(channel_id)
+            self.ssl_verify = True  # Default to verifying SSL
             logger.warning(f"Could not cache channel name for {channel_id}, using UUID as fallback")
 
         # Add this flag for tracking transcoding process status
@@ -913,7 +917,8 @@ class StreamManager:
             self.http_reader = HTTPStreamReader(
                 url=self.url,
                 user_agent=self.user_agent,
-                chunk_size=self.chunk_size
+                chunk_size=self.chunk_size,
+                verify_ssl=self.ssl_verify
             )
 
             # Start the reader thread and get the read end of the pipe

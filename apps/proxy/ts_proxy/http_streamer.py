@@ -15,10 +15,11 @@ logger = get_logger()
 class HTTPStreamReader:
     """Thread-based HTTP stream reader that writes to a pipe"""
 
-    def __init__(self, url, user_agent=None, chunk_size=8192):
+    def __init__(self, url, user_agent=None, chunk_size=8192, verify_ssl=True):
         self.url = url
         self.user_agent = user_agent
         self.chunk_size = chunk_size
+        self.verify_ssl = verify_ssl
         self.session = None
         self.response = None
         self.thread = None
@@ -62,7 +63,8 @@ class HTTPStreamReader:
                 self.url,
                 headers=headers,
                 stream=True,
-                timeout=(5, 30)  # 5s connect, 30s read
+                timeout=(5, 30),  # 5s connect, 30s read
+                verify=self.verify_ssl
             )
 
             if self.response.status_code != 200:

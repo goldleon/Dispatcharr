@@ -29,6 +29,7 @@ class StreamProfileSerializer(serializers.ModelSerializer):
             "command",
             "parameters",
             "is_active",
+            "ssl_verify",
             "user_agent",
             "locked",
         ]
