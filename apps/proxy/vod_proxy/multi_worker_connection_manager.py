@@ -24,6 +24,11 @@ from apps.m3u.models import M3UAccountProfile
 logger = logging.getLogger("vod_proxy")
 
 
+class ProviderConnectionLimitError(Exception):
+    """Raised when the IPTV provider returns HTTP 458 (max connections reached)."""
+    pass
+
+
 def get_vod_client_stop_key(client_id):
     """Get the Redis key for signaling a VOD client to stop"""
     return f"vod_proxy:client:{client_id}:stop"
@@ -365,6 +370,10 @@ class RedisBackedVODConnection:
                 timeout=(10, 10),
                 allow_redirects=allow_redirects
             )
+            if response.status_code == 458:
+                raise ProviderConnectionLimitError(
+                    f"Provider connection limit reached (HTTP 458) for session {self.session_id}"
+                )
             response.raise_for_status()
 
             # Update state with response info on first request
