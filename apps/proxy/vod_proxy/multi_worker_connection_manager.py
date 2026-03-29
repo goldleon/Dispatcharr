@@ -488,8 +488,13 @@ class RedisBackedVODConnection:
             logger.warning(f"[{self.session_id}] Could not validate range header {range_header}: {e}")
             return range_header
 
-    def increment_active_streams(self):
-        """Increment active streams count in Redis. Returns new active_streams count, or 0 on failure."""
+    def increment_active_streams(self, client_tag=None):
+        """Increment active streams count in Redis. Returns new active_streams count, or 0 on failure.
+
+        Args:
+            client_tag: Optional unique tag for this stream consumer (e.g. thread id).
+                        Used for heartbeat-based drift reconciliation.
+        """
         if not self._acquire_lock():
             logger.warning(f"[{self.session_id}] INCR-AS failed: could not acquire lock")
             return 0
@@ -502,14 +507,28 @@ class RedisBackedVODConnection:
                 state.last_activity = time.time()
                 self._save_connection_state(state)
                 logger.debug(f"[{self.session_id}] INCR-AS {old} -> {state.active_streams}")
+
+                # Track in a secondary Redis Set for drift detection
+                if client_tag and self.redis_client:
+                    try:
+                        set_key = f"vod_active_set:{self.session_id}"
+                        self.redis_client.sadd(set_key, client_tag)
+                        self.redis_client.expire(set_key, 3600)  # 1h TTL as safety net
+                    except Exception as e:
+                        logger.debug(f"[{self.session_id}] Failed to update active set: {e}")
+
                 return state.active_streams
             logger.warning(f"[{self.session_id}] INCR-AS failed: no state")
             return 0
         finally:
             self._release_lock()
 
-    def decrement_active_streams(self):
-        """Decrement active streams count in Redis"""
+    def decrement_active_streams(self, client_tag=None):
+        """Decrement active streams count in Redis
+
+        Args:
+            client_tag: Optional unique tag previously passed to increment_active_streams.
+        """
         if not self._acquire_lock():
             logger.warning(f"[{self.session_id}] DECR-AS failed: could not acquire lock")
             return False
@@ -522,12 +541,56 @@ class RedisBackedVODConnection:
                 state.last_activity = time.time()
                 self._save_connection_state(state)
                 logger.debug(f"[{self.session_id}] DECR-AS {old} -> {state.active_streams}")
+
+                # Remove from secondary tracking set
+                if client_tag and self.redis_client:
+                    try:
+                        set_key = f"vod_active_set:{self.session_id}"
+                        self.redis_client.srem(set_key, client_tag)
+                    except Exception as e:
+                        logger.debug(f"[{self.session_id}] Failed to update active set: {e}")
+
                 return True
             if not state:
                 logger.warning(f"[{self.session_id}] DECR-AS failed: no state")
             else:
                 logger.warning(f"[{self.session_id}] DECR-AS failed: active_streams already {state.active_streams}")
             return False
+        finally:
+            self._release_lock()
+
+    def reconcile_active_streams(self):
+        """Reconcile the active_streams counter against the secondary tracking set.
+
+        If the counter is positive but the set is empty (or smaller), the counter
+        has drifted due to missed decrements. This resets the counter to match
+        the set cardinality, fixing phantom connection counts.
+        """
+        if not self.redis_client:
+            return
+
+        if not self._acquire_lock():
+            return
+
+        try:
+            state = self._get_connection_state()
+            if not state:
+                return
+
+            set_key = f"vod_active_set:{self.session_id}"
+            set_count = self.redis_client.scard(set_key) or 0
+
+            if state.active_streams != set_count:
+                logger.warning(
+                    f"[{self.session_id}] Counter drift detected: "
+                    f"counter={state.active_streams}, set={set_count}. "
+                    f"Reconciling to {set_count}."
+                )
+                state.active_streams = set_count
+                state.last_activity = time.time()
+                self._save_connection_state(state)
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Error reconciling active streams: {e}")
         finally:
             self._release_lock()
 
@@ -1286,9 +1349,20 @@ class MultiWorkerVODConnectionManager:
                         last_activity = float(data.get('last_activity', 0))
                         active_streams = int(data.get('active_streams', 0))
 
+                        # Reconcile counter drift before deciding whether to cleanup
+                        session_id = key.decode('utf-8').replace('vod_persistent_connection:', '')
+                        if active_streams > 0:
+                            redis_connection = RedisBackedVODConnection(session_id, self.redis_client)
+                            redis_connection.reconcile_active_streams()
+                            # Re-read after reconciliation
+                            refreshed = self.redis_client.hgetall(key)
+                            if refreshed:
+                                if isinstance(list(refreshed.keys())[0], bytes):
+                                    refreshed = {k.decode('utf-8'): v.decode('utf-8') for k, v in refreshed.items()}
+                                active_streams = int(refreshed.get('active_streams', 0))
+
                         # Clean up if stale and no active streams
                         if (current_time - last_activity > max_age_seconds) and active_streams == 0:
-                            session_id = key.decode('utf-8').replace('vod_persistent_connection:', '')
                             logger.info(f"Cleaning up stale connection: {session_id}")
 
                             # Clean up connection and related keys
