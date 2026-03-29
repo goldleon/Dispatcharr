@@ -15,7 +15,7 @@ from django.views import View
 from apps.vod.models import Movie, Series, Episode
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.connection_manager import VODConnectionManager
-from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key
+from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key, ProviderConnectionLimitError
 from .utils import get_client_info, create_vod_response
 
 logger = logging.getLogger(__name__)
@@ -201,19 +201,33 @@ class VODStreamView(View):
 
             # Stream the content with session-based connection reuse
             logger.info("[VOD-STREAM] Calling connection manager to stream content")
-            response = connection_manager.stream_content_with_session(
-                session_id=session_id,
-                content_obj=content_obj,
-                stream_url=final_stream_url,
-                m3u_profile=m3u_profile,
-                client_ip=client_ip,
-                client_user_agent=client_user_agent,
-                request=request,
-                utc_start=utc_start,
-                utc_end=utc_end,
-                offset=offset,
-                range_header=range_header
-            )
+            try:
+                response = connection_manager.stream_content_with_session(
+                    session_id=session_id,
+                    content_obj=content_obj,
+                    stream_url=final_stream_url,
+                    m3u_profile=m3u_profile,
+                    client_ip=client_ip,
+                    client_user_agent=client_user_agent,
+                    request=request,
+                    utc_start=utc_start,
+                    utc_end=utc_end,
+                    offset=offset,
+                    range_header=range_header
+                )
+            except ProviderConnectionLimitError as e:
+                logger.warning(f"[VOD-LIMIT] Provider connection limit reached: {e}")
+                return HttpResponse(
+                    "Provider connection limit reached. Try again later.",
+                    status=503
+                )
+            except requests.exceptions.HTTPError as e:
+                status = e.response.status_code if e.response is not None else 502
+                logger.error(f"[VOD-UPSTREAM] Upstream HTTP error {status}: {e}")
+                return HttpResponse(
+                    f"Upstream error ({status})",
+                    status=503
+                )
 
             logger.info(f"[VOD-SUCCESS] Stream response created successfully, type: {type(response)}")
             return response
