@@ -104,6 +104,14 @@ class StreamManager:
 
         logger.info(f"Initialized stream manager for channel {buffer.channel_id}")
 
+        # Cache channel name to avoid repeated DB queries in hot paths
+        try:
+            _channel_obj = Channel.objects.get(uuid=channel_id)
+            self.channel_name = _channel_obj.name
+        except Exception:
+            self.channel_name = str(channel_id)
+            logger.warning(f"Could not cache channel name for {channel_id}, using UUID as fallback")
+
         # Add this flag for tracking transcoding process status
         self.transcode_process_active = False
 
@@ -268,11 +276,10 @@ class StreamManager:
                             # Log reconnection event if this is a retry (not first attempt)
                             if self.retry_count > 0:
                                 try:
-                                    channel_obj = Channel.objects.get(uuid=self.channel_id)
                                     log_system_event(
                                         'channel_reconnect',
                                         channel_id=self.channel_id,
-                                        channel_name=channel_obj.name,
+                                        channel_name=self.channel_name,
                                         attempt=self.retry_count + 1,
                                         max_attempts=self.max_retries
                                     )
@@ -309,13 +316,11 @@ class StreamManager:
                             url_failed = True
                             logger.warning(f"Maximum retry attempts ({self.max_retries}) reached for URL: {self.url} for channel: {self.channel_id}")
 
-                            # Log connection error event
                             try:
-                                channel_obj = Channel.objects.get(uuid=self.channel_id)
                                 log_system_event(
                                     'channel_error',
                                     channel_id=self.channel_id,
-                                    channel_name=channel_obj.name,
+                                    channel_name=self.channel_name,
                                     error_type='connection_failed',
                                     url=self.url[:100] if self.url else None,
                                     attempts=self.max_retries
@@ -336,13 +341,11 @@ class StreamManager:
                         if self.retry_count >= self.max_retries:
                             url_failed = True
 
-                            # Log connection error event with exception details
                             try:
-                                channel_obj = Channel.objects.get(uuid=self.channel_id)
                                 log_system_event(
                                     'channel_error',
                                     channel_id=self.channel_id,
-                                    channel_name=channel_obj.name,
+                                    channel_name=self.channel_name,
                                     error_type='connection_exception',
                                     error_message=str(e)[:200],
                                     url=self.url[:100] if self.url else None,
@@ -806,13 +809,11 @@ class StreamManager:
                                 self.buffering = False
                                 self.buffering_start_time = None
 
-                                # Log failover event
                                 try:
-                                    channel_obj = Channel.objects.get(uuid=self.channel_id)
                                     log_system_event(
                                         'channel_failover',
                                         channel_id=self.channel_id,
-                                        channel_name=channel_obj.name,
+                                        channel_name=self.channel_name,
                                         reason='buffering_timeout',
                                         duration=buffering_duration
                                     )
@@ -826,13 +827,11 @@ class StreamManager:
                     self.buffering_start_time = time.time()
                     logger.warning(f"Buffering started for channel {self.channel_id} - speed: {ffmpeg_speed}x")
 
-                    # Log system event for buffering
                     try:
-                        channel_obj = Channel.objects.get(uuid=self.channel_id)
                         log_system_event(
                             'channel_buffering',
                             channel_id=self.channel_id,
-                            channel_name=channel_obj.name,
+                            channel_name=self.channel_name,
                             speed=ffmpeg_speed
                         )
                     except Exception as e:
@@ -1133,13 +1132,11 @@ class StreamManager:
                 except Exception as e:
                     logger.warning(f"Failed to reset buffer position: {e}")
 
-            # Log stream switch event
             try:
-                channel_obj = Channel.objects.get(uuid=self.channel_id)
                 log_system_event(
                     'stream_switch',
                     channel_id=self.channel_id,
-                    channel_name=channel_obj.name,
+                    channel_name=self.channel_name,
                     new_url=new_url[:100] if new_url else None,
                     stream_id=stream_id
                 )
@@ -1265,13 +1262,11 @@ class StreamManager:
                     self.connection_start_time = time.time()
                     logger.info(f"Reconnect successful for channel {self.channel_id}")
 
-                    # Log reconnection event
                     try:
-                        channel_obj = Channel.objects.get(uuid=self.channel_id)
                         log_system_event(
                             'channel_reconnect',
                             channel_id=self.channel_id,
-                            channel_name=channel_obj.name,
+                            channel_name=self.channel_name,
                             reason='health_monitor'
                         )
                     except Exception as e:
