@@ -917,8 +917,12 @@ class MultiWorkerVODConnectionManager:
                 # Use M3U account's user-agent for provider requests, not client's user-agent
                 m3u_user_agent = m3u_profile.m3u_account.get_user_agent()
                 if m3u_user_agent:
-                    headers['User-Agent'] = m3u_user_agent.user_agent
-                    logger.info(f"[{client_id}] Using M3U account user-agent: {m3u_user_agent.user_agent}")
+                    if isinstance(m3u_user_agent.headers, dict) and m3u_user_agent.headers:
+                        headers.update(m3u_user_agent.headers)
+                        logger.info(f"[{client_id}] Using full M3U account header bundle for: {m3u_user_agent.name}")
+                    else:
+                        headers['User-Agent'] = m3u_user_agent.user_agent
+                        logger.info(f"[{client_id}] Using M3U account user-agent: {m3u_user_agent.user_agent}")
                 elif client_user_agent:
                     # Fallback to client's user-agent if M3U doesn't have one
                     headers['User-Agent'] = client_user_agent

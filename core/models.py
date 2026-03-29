@@ -22,6 +22,11 @@ class UserAgent(models.Model):
         blank=True,
         help_text="An optional description of the client or device type.",
     )
+    headers = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Full header set to send with this User-Agent. Leave empty to use User-Agent only."
+    )
     is_active = models.BooleanField(
         default=True,
         help_text="Whether this user agent is currently allowed/recognized.",

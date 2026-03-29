@@ -121,17 +121,49 @@ class StreamManager:
 
         logger.info(f"Initialized stream manager for channel {buffer.channel_id}")
 
+        # Build custom upstream headers
+        self.upstream_headers = {"User-Agent": user_agent}
+
         # Cache channel name and SSL verify setting to avoid repeated DB queries in hot paths
         try:
+            from core.models import Channel, Stream
             _channel_obj = Channel.objects.get(uuid=channel_id)
             self.channel_name = _channel_obj.name
             # Cache ssl_verify from the channel's stream profile
             _stream_profile = _channel_obj.get_stream_profile()
             self.ssl_verify = getattr(_stream_profile, 'ssl_verify', True)
-        except Exception:
+
+            # Apply full header bundle
+            if _stream_profile.user_agent:
+                if isinstance(_stream_profile.user_agent.headers, dict) and _stream_profile.user_agent.headers:
+                    self.upstream_headers.update(_stream_profile.user_agent.headers)
+                else:
+                    self.upstream_headers["User-Agent"] = _stream_profile.user_agent.user_agent
+
+            # Stream specific headers
+            _stream_obj = None
+            if stream_id:
+                try:
+                    _stream_obj = Stream.objects.get(id=stream_id)
+                except Exception:
+                    pass
+
+            if _stream_obj:
+                if getattr(_stream_obj, 'http_referrer', None):
+                    self.upstream_headers['Referer'] = _stream_obj.http_referrer
+                    from urllib.parse import urlparse
+                    p = urlparse(_stream_obj.http_referrer)
+                    self.upstream_headers['Origin'] = f"{p.scheme}://{p.netloc}"
+
+                if getattr(_stream_obj, 'custom_headers', None):
+                    self.upstream_headers.update(_stream_obj.custom_headers)
+        except Exception as e:
             self.channel_name = str(channel_id)
             self.ssl_verify = True  # Default to verifying SSL
-            logger.warning(f"Could not cache channel name for {channel_id}, using UUID as fallback")
+            logger.warning(f"Could not fully populate stream settings for {channel_id}: {e}")
+
+        # Always strip client-identifying headers last
+        self.upstream_headers = build_upstream_headers(self.upstream_headers)
 
         # Add this flag for tracking transcoding process status
         self.transcode_process_active = False
@@ -156,12 +188,9 @@ class StreamManager:
         """Create and configure requests session with optimal settings"""
         session = requests.Session()
 
-        # Configure session headers
-        base_headers = {
-            'User-Agent': self.user_agent,
-            'Connection': 'keep-alive'
-        }
-        session.headers.update(build_upstream_headers(base_headers))
+        # Set up headers for upstream request
+        self.upstream_headers['Connection'] = 'keep-alive'
+        session.headers.update(self.upstream_headers)
 
         # Set up connection pooling for better performance
         adapter = requests.adapters.HTTPAdapter(
