@@ -901,6 +901,9 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
                             "is_stale": False,
                             "stream_id": provider_stream_id,
                             "stream_chno": stream_chno,
+                            "http_referrer": None,
+                            "http_origin": None,
+                            "custom_headers": {},
                         }
 
                         if stream_hash not in stream_hashes:
@@ -931,9 +934,11 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
                     obj.custom_properties != stream_props["custom_properties"] or
                     obj.is_adult != stream_props["is_adult"] or
                     obj.stream_id != stream_props["stream_id"] or
-                    obj.stream_chno != stream_props["stream_chno"]
+                    obj.stream_chno != stream_props["stream_chno"] or
+                    obj.http_referrer != stream_props["http_referrer"] or
+                    obj.http_origin != stream_props["http_origin"] or
+                    obj.custom_headers != stream_props["custom_headers"]
                 )
-
                 if changed:
                     for key, value in stream_props.items():
                         setattr(obj, key, value)
@@ -967,7 +972,7 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
                     # Simplified bulk update for better performance
                     Stream.objects.bulk_update(
                         streams_to_update,
-                        ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno'],
+                        ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno', 'http_referrer', 'http_origin', 'custom_headers'],
                         batch_size=150  # Smaller batch size for XC processing
                     )
 
@@ -1106,6 +1111,11 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 account_type=account_type_for_hash, stream_id=provider_stream_id
             )
 
+            extvlcopt = stream_info.get("extvlcopt", {})
+            http_referrer = extvlcopt.pop("http-referrer", None)
+            http_origin = extvlcopt.pop("http-origin", None)
+            custom_headers = dict(extvlcopt) if extvlcopt else {}
+
             stream_props = {
                 "name": name,
                 "url": url,
@@ -1119,6 +1129,9 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 "is_stale": False,
                 "stream_id": provider_stream_id,
                 "stream_chno": channel_num,
+                "http_referrer": http_referrer,
+                "http_origin": http_origin,
+                "custom_headers": custom_headers,
             }
 
             if stream_hash not in stream_hashes:
@@ -1146,7 +1159,10 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 obj.custom_properties != stream_props["custom_properties"] or
                 obj.is_adult != stream_props["is_adult"] or
                 obj.stream_id != stream_props["stream_id"] or
-                obj.stream_chno != stream_props["stream_chno"]
+                obj.stream_chno != stream_props["stream_chno"] or
+                obj.http_referrer != stream_props["http_referrer"] or
+                obj.http_origin != stream_props["http_origin"] or
+                obj.custom_headers != stream_props["custom_headers"]
             )
 
             # Always update last_seen
@@ -1162,6 +1178,9 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 obj.is_adult = stream_props["is_adult"]
                 obj.stream_id = stream_props["stream_id"]
                 obj.stream_chno = stream_props["stream_chno"]
+                obj.http_referrer = stream_props["http_referrer"]
+                obj.http_origin = stream_props["http_origin"]
+                obj.custom_headers = stream_props["custom_headers"]
                 obj.updated_at = timezone.now()
 
             # Always mark as not stale since we saw it in this refresh
@@ -1184,7 +1203,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
                 # Update all streams in a single bulk operation
                 Stream.objects.bulk_update(
                     streams_to_update,
-                    ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno'],
+                    ['name', 'url', 'logo_url', 'tvg_id', 'custom_properties', 'is_adult', 'last_seen', 'updated_at', 'is_stale', 'stream_id', 'stream_chno', 'http_referrer', 'http_origin', 'custom_headers'],
                     batch_size=200
                 )
     except Exception as e:
@@ -1526,6 +1545,15 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
                         f"Failed to parse EXTINF at line {line_index+1}: {line[:200]}"
                     )
                     problematic_lines.append((line_index + 1, line[:200]))
+
+            elif line.startswith("#EXTVLCOPT:"):
+                if extinf_data:
+                    opt_content = line[len("#EXTVLCOPT:"):].strip()
+                    if "=" in opt_content:
+                        k, v = opt_content.split("=", 1)
+                        if "extvlcopt" not in extinf_data[-1]:
+                            extinf_data[-1]["extvlcopt"] = {}
+                        extinf_data[-1]["extvlcopt"][k.strip()] = v.strip()
 
             elif extinf_data and (line.startswith("http") or line.startswith("rtsp") or line.startswith("rtp") or line.startswith("udp")):
                 url_count += 1

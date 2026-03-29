@@ -134,6 +134,16 @@ class Stream(models.Model):
         db_index=True
     )
 
+    http_referrer = models.URLField(
+        max_length=512, blank=True, null=True, help_text="Referer header for the stream"
+    )
+    http_origin = models.URLField(
+        max_length=512, blank=True, null=True, help_text="Origin header for the stream"
+    )
+    custom_headers = models.JSONField(
+        blank=True, default=dict, help_text="Stream specific custom headers"
+    )
+
     class Meta:
         # If you use m3u_account, you might do unique_together = ('name','url','m3u_account')
         verbose_name = "Stream"

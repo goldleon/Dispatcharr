@@ -151,9 +151,14 @@ class StreamManager:
             if _stream_obj:
                 if getattr(_stream_obj, 'http_referrer', None):
                     self.upstream_headers['Referer'] = _stream_obj.http_referrer
-                    from urllib.parse import urlparse
-                    p = urlparse(_stream_obj.http_referrer)
-                    self.upstream_headers['Origin'] = f"{p.scheme}://{p.netloc}"
+                    # Default Origin to Referer base if not explicitly set
+                    if not getattr(_stream_obj, 'http_origin', None):
+                        from urllib.parse import urlparse
+                        p = urlparse(_stream_obj.http_referrer)
+                        self.upstream_headers['Origin'] = f"{p.scheme}://{p.netloc}"
+
+                if getattr(_stream_obj, 'http_origin', None):
+                    self.upstream_headers['Origin'] = _stream_obj.http_origin
 
                 if getattr(_stream_obj, 'custom_headers', None):
                     self.upstream_headers.update(_stream_obj.custom_headers)
