@@ -7,6 +7,7 @@ import threading
 import os
 import requests
 from requests.adapters import HTTPAdapter
+from core.utils import build_upstream_headers
 from .utils import get_logger
 
 logger = get_logger()
@@ -15,9 +16,9 @@ logger = get_logger()
 class HTTPStreamReader:
     """Thread-based HTTP stream reader that writes to a pipe"""
 
-    def __init__(self, url, user_agent=None, chunk_size=8192, verify_ssl=True):
+    def __init__(self, url, headers=None, chunk_size=8192, verify_ssl=True):
         self.url = url
-        self.user_agent = user_agent
+        self.headers = headers or {}
         self.chunk_size = chunk_size
         self.verify_ssl = verify_ssl
         self.session = None
@@ -44,11 +45,9 @@ class HTTPStreamReader:
         """Thread worker that reads HTTP stream and writes to pipe"""
         try:
             # Build headers
-            headers = {}
-            if self.user_agent:
-                headers['User-Agent'] = self.user_agent
+            headers = self.headers.copy()
 
-            logger.info(f"HTTP reader connecting to {self.url}")
+            logger.info(f"HTTP reader connecting to {self.url} with {len(headers)} headers")
 
             # Create session
             self.session = requests.Session()
@@ -61,7 +60,7 @@ class HTTPStreamReader:
             # Stream the URL
             self.response = self.session.get(
                 self.url,
-                headers=headers,
+                headers=build_upstream_headers(headers),
                 stream=True,
                 timeout=(5, 30),  # 5s connect, 30s read
                 verify=self.verify_ssl

@@ -12,6 +12,7 @@ import django_filters
 import logging
 import os
 import requests
+from core.utils import build_upstream_headers
 from apps.accounts.permissions import (
     Authenticated,
     permission_classes_by_action,
@@ -824,7 +825,10 @@ class VODLogoViewSet(viewsets.ModelViewSet):
         else:
             # It's a remote URL - proxy it
             try:
-                response = requests.get(logo.url, stream=True, timeout=10)
+                # Build headers for fingerprinting/IP privacy
+                headers = build_upstream_headers()
+                
+                response = requests.get(logo.url, stream=True, timeout=10, headers=headers)
                 response.raise_for_status()
 
                 content_type = response.headers.get('Content-Type', 'image/png')

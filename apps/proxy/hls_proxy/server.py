@@ -18,6 +18,7 @@ from typing import Optional, Dict, List, Set, Deque
 import sys
 import os
 from apps.proxy.config import HLSConfig as Config
+from core.utils import build_upstream_headers
 
 # Global state management
 manifest_buffer = None  # Stores current manifest content
@@ -362,11 +363,10 @@ class StreamFetcher:
         self.stream_url = manager.current_url
         self.session = requests.Session()
         
-        # Configure session headers
-        self.session.headers.update({
-            'User-Agent': manager.user_agent,
-            'Connection': 'keep-alive'
-        })
+        # Configure session headers using privacy utility
+        headers = build_upstream_headers(user_agent=manager.user_agent)
+        headers['Connection'] = 'keep-alive'
+        self.session.headers.update(headers)
         
         # Set up connection pooling
         adapter = requests.adapters.HTTPAdapter(

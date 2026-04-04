@@ -12,6 +12,7 @@ from core.models import UserAgent, CoreSettings, StreamProfile
 from .utils import get_logger
 from uuid import UUID
 import requests
+from core.utils import build_upstream_headers
 
 logger = get_logger()
 
@@ -422,7 +423,7 @@ def validate_stream_url(url, user_agent=None, timeout=(5, 5)):
             'User-Agent': user_agent,
             'Connection': 'close'  # Don't keep connection alive
         }
-        session.headers.update(headers)
+        session.headers.update(build_upstream_headers(headers))
 
         # Make HEAD request first as it's faster and doesn't download content
         head_request_success = True

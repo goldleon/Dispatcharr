@@ -669,3 +669,46 @@ def send_notification_dismissed(notification_key):
         )
     except Exception as e:
         logger.error(f"Failed to send notification dismissed event: {e}")
+
+# Header privacy and spoofing protection
+HEADERS_TO_STRIP = frozenset({
+    'X-Forwarded-For',
+    'X-Forwarded-Host',
+    'X-Forwarded-Proto',
+    'X-Real-IP',
+    'Forwarded',
+    'Via',
+    'True-Client-IP',
+    'X-Client-IP',
+    'CF-Connecting-IP',
+    'CF-Ray',
+    'CF-Visitor',
+    'CF-IPCountry',
+})
+
+def build_upstream_headers(base_headers: dict = None, user_agent: str = None) -> dict:
+    """Strip client-identifying headers from upstream requests and adopt browser-like headers."""
+    # Start with a common set of browser-like headers
+    headers = {
+        'User-Agent': user_agent or 'VLC/3.0.21 LibVLC/3.0.21',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    }
+    
+    # Merge with base_headers if provided
+    if base_headers:
+        headers.update(base_headers)
+        
+    # Strip identifying headers (using case-insensitive comparison)
+    # requests/urllib3 usually handle this, but being explicit here
+    stripped_headers = {}
+    for k, v in headers.items():
+        if k.title() not in HEADERS_TO_STRIP:
+            stripped_headers[k] = v
+            
+    return stripped_headers
+

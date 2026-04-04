@@ -24,7 +24,15 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 from .models import EPGSource, EPGData, ProgramData
-from core.utils import acquire_task_lock, release_task_lock, TaskLockRenewer, send_websocket_update, cleanup_memory, log_system_event
+from core.utils import (
+    acquire_task_lock, 
+    release_task_lock, 
+    TaskLockRenewer, 
+    send_websocket_update, 
+    cleanup_memory, 
+    log_system_event,
+    build_upstream_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -310,6 +318,7 @@ def fetch_xmltv(source):
         headers = {
             'User-Agent': user_agent
         }
+        headers = build_upstream_headers(headers)
 
         # Update status to fetching before starting download
         source.status = 'fetching'
@@ -1786,6 +1795,7 @@ def fetch_schedules_direct(source):
             'Authorization': f'Bearer {source.api_key}',
             'User-Agent': user_agent
         }
+        headers = build_upstream_headers(headers)
         logger.debug(f"Requesting subscriptions from Schedules Direct using URL: {api_url}")
         response = requests.get(api_url, headers=headers, timeout=30)
         response.raise_for_status()

@@ -2331,7 +2331,10 @@ def xc_get_epg(request, user, short=False):
     # Get the mapped integer for this specific channel
     channel_num_int = channel_num_map.get(channel.id, int(channel.channel_number))
 
-    limit = int(request.GET.get('limit', 4))
+    try:
+        limit = int(request.GET.get('limit', 4))
+    except (ValueError, TypeError):
+        limit = 4
     if channel.epg_data:
         # Check if this is a dummy EPG that generates on-demand
         if channel.epg_data.epg_source and channel.epg_data.epg_source.source_type == 'dummy':

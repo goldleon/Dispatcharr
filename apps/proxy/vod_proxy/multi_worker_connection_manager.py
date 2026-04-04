@@ -17,31 +17,14 @@ import mimetypes
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any
 from django.http import StreamingHttpResponse, HttpResponse
-from core.utils import RedisClient
+from core.utils import RedisClient, HEADERS_TO_STRIP, build_upstream_headers
 from apps.vod.models import Movie, Episode
 from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
 
-
-HEADERS_TO_STRIP = frozenset({
-    'X-Forwarded-For',
-    'X-Forwarded-Host',
-    'X-Forwarded-Proto',
-    'X-Real-IP',
-    'Forwarded',
-    'Via',
-    'True-Client-IP',
-    'X-Client-IP',
-})
-
-def build_upstream_headers(base_headers: dict) -> dict:
-    return {
-        k: v for k, v in base_headers.items()
-        if k not in HEADERS_TO_STRIP
-    }
-
 class ProviderConnectionLimitError(Exception):
+
     """Raised when the IPTV provider returns HTTP 458 (max connections reached)."""
     pass
 
@@ -382,7 +365,7 @@ class RedisBackedVODConnection:
             # Make request (10s connect, 10s read timeout - keeps lock time reasonable if client disconnects)
             response = self.local_session.get(
                 target_url,
-                headers=headers,
+                headers=build_upstream_headers(headers),
                 stream=True,
                 timeout=(10, 10),
                 allow_redirects=allow_redirects
@@ -833,17 +816,18 @@ class MultiWorkerVODConnectionManager:
             return None
 
     def _decrement_profile_connections(self, m3u_profile_id: int):
-        """Decrement profile connection count"""
+        """Decrement profile connection count with atomic fallback for negative values"""
         try:
             profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
-            current_count = int(self.redis_client.get(profile_connections_key) or 0)
-            if current_count > 0:
-                new_count = self.redis_client.decr(profile_connections_key)
-                logger.info(f"[PROFILE-DECR] Profile {m3u_profile_id} connections: {new_count}")
-                return new_count
-            else:
-                logger.warning(f"[PROFILE-DECR] Profile {m3u_profile_id} already at 0 connections")
+            new_count = self.redis_client.decr(profile_connections_key)
+
+            if new_count < 0:
+                self.redis_client.set(profile_connections_key, 0)
+                logger.warning(f"[PROFILE-DECR] Reset connection counter for profile {m3u_profile_id} (was negative: {new_count})")
                 return 0
+
+            logger.info(f"[PROFILE-DECR] Profile {m3u_profile_id} connections: {new_count}")
+            return new_count
         except Exception as e:
             logger.error(f"Error decrementing profile connections: {e}")
             return None
@@ -1417,13 +1401,9 @@ class MultiWorkerVODConnectionManager:
             return False
 
         try:
-            # Check profile connection limits
-            profile_connections_key = f"profile_connections:{m3u_profile.id}"
-            current_connections = self.redis_client.get(profile_connections_key)
-            max_connections = getattr(m3u_profile, 'max_connections', 3)  # Default to 3
-
-            if current_connections and int(current_connections) >= max_connections:
-                logger.warning(f"Profile {m3u_profile.name} connection limit exceeded ({current_connections}/{max_connections})")
+            # Check profile connection limits using atomic INCR-first pattern
+            if not self._check_and_reserve_profile_slot(m3u_profile):
+                logger.warning(f"Profile {m3u_profile.name} connection limit exceeded")
                 return False
 
             # Create connection tracking
@@ -1452,11 +1432,11 @@ class MultiWorkerVODConnectionManager:
                 "position_seconds": "0"
             }
 
-            # Use pipeline for atomic operations
+            # Use pipeline for remaining operations
             pipe = self.redis_client.pipeline()
             pipe.hset(connection_key, mapping=connection_data)
             pipe.expire(connection_key, self.connection_ttl)
-            pipe.incr(profile_connections_key)
+            # Profile counter already incremented atomically above
             pipe.sadd(content_connections_key, client_id)
             pipe.expire(content_connections_key, self.connection_ttl)
             pipe.execute()
@@ -1486,16 +1466,14 @@ class MultiWorkerVODConnectionManager:
 
                 profile_id = connection_data.get('m3u_profile_id')
                 if profile_id:
-                    profile_connections_key = f"profile_connections:{profile_id}"
-                    current_count = int(self.redis_client.get(profile_connections_key) or 0)
-
-                    # Use pipeline for atomic operations
+                    # Use pipeline for atomic operations on metadata
                     pipe = self.redis_client.pipeline()
                     pipe.delete(connection_key)
                     pipe.srem(content_connections_key, client_id)
-                    if current_count > 0:
-                        pipe.decr(profile_connections_key)
                     pipe.execute()
+
+                    # Standardized decrement with atomic fallback
+                    self._decrement_profile_connections(int(profile_id))
 
                     logger.info(f"Removed Redis-backed connection: {client_id}")
 

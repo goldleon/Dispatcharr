@@ -229,7 +229,8 @@ class VODStreamView(View):
                     status=503
                 )
 
-            logger.info(f"[VOD-SUCCESS] Stream response created successfully, type: {type(response)}")
+            if isinstance(response, (StreamingHttpResponse, HttpResponse)) and response.status_code in (200, 206):
+                logger.info(f"[VOD-SUCCESS] Stream response created successfully with status {response.status_code}")
             return response
 
         except Exception as e:

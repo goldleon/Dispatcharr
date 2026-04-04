@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.2] - 2026-04-04
+
+### Added
+
+- **Upstream Header Stripping**: Implemented `HEADERS_TO_STRIP` in both TS and VOD proxies to prevent leaking client-identifying information (like `X-Forwarded-For`, `Origin`, `Referer`, and custom Dispatcharr headers) to upstream IPTV providers. Fixed `User-Agent` handling to prioritize the M3U account's configured User-Agent over client passthrough.
+
+### Changed
+
+- **VOD Connection Tracking Hardening**: Refactored `MultiWorkerVODConnectionManager` to use an atomic `INCR`-first reservation pattern for profile-level connection tracking. This eliminates race conditions (TOCTOU) and Redis counter drift that previously caused incorrect "Connection limit exceeded" errors.
+- **VOD Proxy Error Handling**: Improved VOD proxy stability by correctly mapping upstream "Connection Limit Exceeded" (HTTP 458) errors to HTTP 503 (Service Unavailable) instead of 500. Streaming success is now only reported for 200/206 status codes.
+- **EPG Parameter Hardening**: Added robust error handling for the `xc_get_epg` `limit` parameter, preventing crashes when providers or clients send malformed limit values.
+
+### Fixed
+
+- Fixed VOD connection counter leak in `MultiWorkerVODConnectionManager` by ensuring profile slots are correctly released on all failure paths.
+- Corrected `max_streams` field lookup in VOD connection limit enforcement (was incorrectly looking for `max_connections`).
+
 ## [0.21.1] - 2026-03-18
 
 ### Fixed

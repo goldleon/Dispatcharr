@@ -24,7 +24,7 @@ from apps.accounts.permissions import (
 )
 
 from core.models import UserAgent, CoreSettings
-from core.utils import RedisClient
+from core.utils import RedisClient, build_upstream_headers
 
 from .models import (
     Stream,
@@ -1982,12 +1982,15 @@ class LogoViewSet(viewsets.ModelViewSet):
                     # Fallback to hardcoded if default not found
                     user_agent = 'Dispatcharr/1.0'
 
+                # Build headers for fingerprinting/IP privacy
+                headers = build_upstream_headers(user_agent=user_agent)
+
                 # Add proper timeouts to prevent hanging
                 remote_response = requests.get(
                     logo_url,
                     stream=True,
                     timeout=(3, 5),  # (connect_timeout, read_timeout)
-                    headers={'User-Agent': user_agent}
+                    headers=headers
                 )
                 if remote_response.status_code == 200:
                     # Success — clear any previous failure entry

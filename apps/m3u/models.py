@@ -6,7 +6,7 @@ import re
 from django.dispatch import receiver
 from apps.channels.models import StreamProfile
 from django_celery_beat.models import PeriodicTask
-from core.models import CoreSettings, UserAgent
+from core.models import CoreSettings, UserAgent, RedisClient
 
 CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
@@ -286,6 +286,14 @@ class M3UAccountProfile(models.Model):
     def __str__(self):
         return f"{self.name} ({self.m3u_account.name})"
 
+    def reset_profile_connections(self):
+        """Reset the profile's Redis-backed connection counter to zero."""
+        redis_client = RedisClient.get_client()
+        profile_connections_key = f"profile_connections:{self.id}"
+        redis_client.set(profile_connections_key, 0)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"Reset connection counter for profile {self.id} ({self.name})")
     def save(self, *args, **kwargs):
         """Auto-sync exp_date from custom_properties for XC accounts on every save.
         For non-XC accounts, exp_date is set directly and left untouched here."""

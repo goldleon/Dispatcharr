@@ -16,7 +16,7 @@ from apps.proxy.config import TSConfig as Config
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from core.models import UserAgent, CoreSettings
-from core.utils import log_system_event
+from core.utils import log_system_event, HEADERS_TO_STRIP, build_upstream_headers
 from .stream_buffer import StreamBuffer
 from .utils import detect_stream_type, get_logger
 from .redis_keys import RedisKeys
@@ -26,27 +26,11 @@ from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_st
 
 logger = get_logger()
 
-HEADERS_TO_STRIP = frozenset({
-    'X-Forwarded-For',
-    'X-Forwarded-Host',
-    'X-Forwarded-Proto',
-    'X-Real-IP',
-    'Forwarded',
-    'Via',
-    'True-Client-IP',
-    'X-Client-IP',
-})
-
-def build_upstream_headers(base_headers: dict) -> dict:
-    return {
-        k: v for k, v in base_headers.items()
-        if k not in HEADERS_TO_STRIP
-    }
 
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
 
-    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None):
+    def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None, channel_name=None):
         # Basic properties
         self.channel_id = channel_id
         self.url = url
@@ -125,10 +109,14 @@ class StreamManager:
         self.upstream_headers = {"User-Agent": user_agent}
 
         # Cache channel name and SSL verify setting to avoid repeated DB queries in hot paths
+        self.channel_name = channel_name
         try:
             from core.models import Channel, Stream
-            _channel_obj = Channel.objects.get(uuid=channel_id)
-            self.channel_name = _channel_obj.name
+            if not self.channel_name:
+                _channel_obj = Channel.objects.get(uuid=channel_id)
+                self.channel_name = _channel_obj.name
+            else:
+                _channel_obj = Channel.objects.get(uuid=channel_id)
             # Cache ssl_verify from the channel's stream profile
             _stream_profile = _channel_obj.get_stream_profile()
             self.ssl_verify = getattr(_stream_profile, 'ssl_verify', True)
@@ -968,7 +956,7 @@ class StreamManager:
             # Create and start the HTTP stream reader
             self.http_reader = HTTPStreamReader(
                 url=self.url,
-                user_agent=self.user_agent,
+                headers=self.upstream_headers,
                 chunk_size=self.chunk_size,
                 verify_ssl=self.ssl_verify
             )

@@ -25,6 +25,7 @@ from channels.layers import get_channel_layer
 from asgiref.sync import async_to_sync
 import tempfile
 from urllib.parse import quote
+from core.utils import build_upstream_headers
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +51,17 @@ def _validate_url(url, timeout=4):
         return cached[0]
 
     try:
-        resp = requests.head(url, timeout=timeout, allow_redirects=True)
+        # Build headers for fingerprinting/IP privacy
+        headers = build_upstream_headers()
+        
+        resp = requests.head(url, timeout=timeout, allow_redirects=True, headers=headers)
         if resp.status_code == 405:
             # Server doesn't support HEAD; fall back to ranged GET
+            # Range header is added TO the prepared headers
+            headers["Range"] = "bytes=0-0"
             resp = requests.get(
                 url, timeout=timeout, allow_redirects=True,
-                headers={"Range": "bytes=0-0"}, stream=True,
+                headers=headers, stream=True,
             )
             resp.close()
         result = resp.status_code < 400

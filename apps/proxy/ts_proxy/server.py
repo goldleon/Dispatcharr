@@ -642,6 +642,13 @@ class ProxyServer:
             buffer = StreamBuffer(channel_id=channel_id, redis_client=self.redis_client)
             logger.debug(f"Created StreamBuffer for channel {channel_id}")
             self.stream_buffers[channel_id] = buffer
+            # Get channel name for caching in StreamManager
+            channel_name = None
+            try:
+                channel_obj = Channel.objects.get(uuid=channel_id)
+                channel_name = channel_obj.name
+            except Exception:
+                pass
 
             # Only the owner worker creates the actual stream manager
             stream_manager = StreamManager(
@@ -651,7 +658,8 @@ class ProxyServer:
                 user_agent=channel_user_agent,
                 transcode=transcode,
                 stream_id=channel_stream_id,  # Pass stream ID to the manager
-                worker_id=self.worker_id  # Pass worker_id explicitly to eliminate circular dependency
+                worker_id=self.worker_id,  # Pass worker_id explicitly
+                channel_name=channel_name  # NEW: Pass cached name
             )
             logger.info(f"Created StreamManager for channel {channel_id} with stream ID {channel_stream_id}")
             self.stream_managers[channel_id] = stream_manager

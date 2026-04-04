@@ -11,7 +11,7 @@ import re
 import requests
 from typing import Optional, Dict, Any
 from django.http import StreamingHttpResponse, HttpResponse
-from core.utils import RedisClient
+from core.utils import RedisClient, build_upstream_headers
 from apps.vod.models import Movie, Episode
 from apps.m3u.models import M3UAccountProfile
 
@@ -1101,16 +1101,11 @@ class VODConnectionManager:
                 modified_stream_url = self._apply_timeshift_parameters(stream_url, utc_start, utc_end, offset)
                 logger.info(f"[{client_id}] Modified stream URL for timeshift: {modified_stream_url}")
 
-                # Prepare headers
-                headers = {
-                    'User-Agent': user_agent or 'VLC/3.0.21 LibVLC/3.0.21',
-                    'Accept': '*/*',
-                    'Connection': 'keep-alive'
-                }
-
-                # Add any authentication headers from profile
-                if hasattr(m3u_profile, 'auth_headers') and m3u_profile.auth_headers:
-                    headers.update(m3u_profile.auth_headers)
+                # Prepare headers using privacy utility
+                headers = build_upstream_headers(user_agent=user_agent)
+                
+                # Connection: keep-alive is usually good for persistent connections
+                headers['Connection'] = 'keep-alive'
 
                 # Create persistent connection
                 persistent_conn = PersistentVODConnection(session_id, modified_stream_url, headers)

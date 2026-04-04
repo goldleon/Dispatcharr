@@ -1,5 +1,6 @@
 # apps/m3u/tasks.py
 import logging
+from core.utils import build_upstream_headers
 import re
 import requests
 import os
@@ -59,9 +60,10 @@ def fetch_m3u_lines(account, use_cache=False):
                     f"Using user agent: {user_agent} for M3U account: {account.name}"
                 )
                 headers = {"User-Agent": user_agent}
+                headers = build_upstream_headers(headers)
                 logger.info(f"Fetching from URL {account.server_url}")
-
-                # Set account status to FETCHING before starting download
+                
+                 # Set account status to FETCHING before starting download
                 account.status = M3UAccount.Status.FETCHING
                 account.last_message = "Starting download..."
                 account.save(update_fields=["status", "last_message"])
