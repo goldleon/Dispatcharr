@@ -1676,6 +1676,27 @@ def build_dvr_candidates():
     return candidates
 
 
+def _preserve_partial_recording(file_path: str, reason: str = "failed") -> None:
+    """
+    Rename a partial recording artifact (like a failed MKV or TS) instead of
+    deleting it, to preserve data for manual recovery.
+    """
+    if not file_path or not os.path.exists(file_path):
+        return
+    try:
+        import time
+        size = os.path.getsize(file_path)
+        if size == 0:
+            os.remove(file_path)
+            return
+
+        new_path = f"{file_path}.{reason}_{int(time.time())}.partial"
+        os.rename(file_path, new_path)
+        logger.info(f"Preserved partial DVR artifact (size={size:,}b): {file_path} -> {new_path}")
+    except OSError as e:
+        logger.warning(f"Could not preserve partial DVR artifact {file_path}: {e}")
+
+
 @shared_task
 def run_recording(recording_id, channel_id, start_time_str, end_time_str):
     """
@@ -2298,11 +2319,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                     logger.warning(f"Direct TS→MKV remux failed (return code: {result.returncode}), trying fallback TS→MP4→MKV")
 
                     # Clean up partial/failed MKV
-                    try:
-                        if os.path.exists(final_path):
-                            os.remove(final_path)
-                    except Exception:
-                        pass
+                    _preserve_partial_recording(final_path, "failed_remux_direct")
 
                     # Step 1: TS → MP4 (MP4 container handles broken timestamps better)
                     temp_mp4_path = os.path.splitext(temp_ts_path)[0] + ".mp4"
@@ -2335,11 +2352,14 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                             logger.error(f"MP4→MKV conversion failed (return code: {result_mkv.returncode})")
 
                         # Clean up temp MP4
-                        try:
-                            if os.path.exists(temp_mp4_path):
-                                os.remove(temp_mp4_path)
-                        except Exception:
-                            pass
+                        if not remux_success:
+                            _preserve_partial_recording(temp_mp4_path, "failed_mp4_fallback")
+                        else:
+                            try:
+                                if os.path.exists(temp_mp4_path):
+                                    os.remove(temp_mp4_path)
+                            except OSError:
+                                pass
                     else:
                         logger.error(f"TS→MP4 conversion failed (return code: {result_mp4.returncode})")
 
@@ -2373,10 +2393,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                             reject = True
                         if reject:
                             remux_success = False
-                            try:
-                                os.remove(final_path)
-                            except OSError:
-                                pass
+                            _preserve_partial_recording(final_path, "rejected_size")
                     except OSError:
                         pass
 
@@ -2391,21 +2408,12 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                     # Keep TS file for debugging/manual recovery if remux failed
                     logger.warning(f"Remux failed - keeping temp TS file for recovery: {temp_ts_path}")
                     # Clean up any partial MKV
-                    try:
-                        if os.path.exists(final_path):
-                            os.remove(final_path)
-                            logger.debug(f"Cleaned up partial MKV file: {final_path}")
-                    except Exception:
-                        pass
+                    _preserve_partial_recording(final_path, "failed_remux_final")
             break  # Completed (success or deterministic failure)
 
         except (OSError, subprocess.SubprocessError) as e:
             # Clean up partial output before potential retry
-            try:
-                if os.path.exists(final_path):
-                    os.remove(final_path)
-            except Exception:
-                pass
+            _preserve_partial_recording(final_path, f"remux_error_attempt_{_remux_attempt}")
             if _remux_attempt + 1 < _dvr_remux_max_retries:
                 _wait = _dvr_remux_retry_interval * (2 ** _remux_attempt)
                 logger.warning(
