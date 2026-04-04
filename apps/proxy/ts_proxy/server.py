@@ -642,13 +642,8 @@ class ProxyServer:
             buffer = StreamBuffer(channel_id=channel_id, redis_client=self.redis_client)
             logger.debug(f"Created StreamBuffer for channel {channel_id}")
             self.stream_buffers[channel_id] = buffer
-            # Get channel name for caching in StreamManager
-            channel_name = None
-            try:
-                channel_obj = Channel.objects.get(uuid=channel_id)
-                channel_name = channel_obj.name
-            except Exception:
-                pass
+            from apps.proxy.ts_proxy.cache import get_channel_name
+            channel_name = get_channel_name(channel_id)
 
             # Only the owner worker creates the actual stream manager
             stream_manager = StreamManager(
@@ -666,21 +661,16 @@ class ProxyServer:
 
             # Log channel start event
             try:
-                channel_obj = Channel.objects.get(uuid=channel_id)
+                from apps.proxy.ts_proxy.cache import get_channel_name, get_stream_name
+                channel_name_for_event = get_channel_name(channel_id)
 
                 # Get stream name if stream_id is available
-                stream_name = None
-                if channel_stream_id:
-                    try:
-                        stream_obj = Stream.objects.get(id=channel_stream_id)
-                        stream_name = stream_obj.name
-                    except Exception:
-                        pass
+                stream_name = get_stream_name(channel_stream_id) if channel_stream_id else None
 
                 log_system_event(
                     'channel_start',
                     channel_id=channel_id,
-                    channel_name=channel_obj.name,
+                    channel_name=channel_name_for_event or "Unknown",
                     stream_name=stream_name,
                     stream_id=channel_stream_id
                 )

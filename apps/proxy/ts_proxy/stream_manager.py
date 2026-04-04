@@ -110,15 +110,17 @@ class StreamManager:
 
         # Cache channel name and SSL verify setting to avoid repeated DB queries in hot paths
         self.channel_name = channel_name
+        from apps.proxy.ts_proxy.cache import get_channel_name, get_channel_ssl_verify
+        self.channel_name = channel_name or get_channel_name(channel_id)
+        
         try:
             from core.models import Channel, Stream
-            if not self.channel_name:
-                _channel_obj = Channel.objects.get(uuid=channel_id)
-                self.channel_name = _channel_obj.name
-            else:
-                _channel_obj = Channel.objects.get(uuid=channel_id)
-            # Cache ssl_verify from the channel's stream profile
-            _stream_profile = _channel_obj.get_stream_profile()
+            self.ssl_verify = get_channel_ssl_verify(channel_id)
+            
+            # For headers, we currently still need the model to evaluate the custom ones
+            _channel_obj = Channel.objects.filter(uuid=channel_id).prefetch_related('channelgroup_set__m3u_accounts').first()
+            if _channel_obj:
+                _stream_profile = _channel_obj.get_stream_profile()
             self.ssl_verify = getattr(_stream_profile, 'ssl_verify', True)
 
             # Apply full header bundle
@@ -1116,15 +1118,13 @@ class StreamManager:
         # Update stream profile if we're switching streams
         if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
             try:
-                # Get the channel by UUID
-                channel = Channel.objects.get(uuid=self.channel_id)
-
-                # Get stream to find its profile
-                #new_stream = Stream.objects.get(pk=stream_id)
-
                 # Use the new method to update the profile and manage connection counts
                 if m3u_profile_id:
-                    success = channel.update_stream_profile(m3u_profile_id)
+                    # Execute async via celery or direct filter instead of using the channel instance methods
+                    # Since update_stream_profile evaluates complex rules, we must fetch the channel
+                    channel = Channel.objects.filter(uuid=self.channel_id).first()
+                    if channel:
+                        success = channel.update_stream_profile(m3u_profile_id)
                     if success:
                         logger.debug(f"Updated m3u profile for channel {self.channel_id} to use profile from stream {stream_id}")
                     else:
