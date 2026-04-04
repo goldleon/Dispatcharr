@@ -703,8 +703,8 @@ class RedisBackedVODConnection:
 
             # Decrement profile connections if we have the state and connection manager
             if state.m3u_profile_id and connection_manager:
-                connection_manager._decrement_profile_connections(state.m3u_profile_id)
-                logger.info(f"[{self.session_id}] Profile connection count decremented for profile {state.m3u_profile_id}")
+                connection_manager._decrement_profile_connections(state.m3u_profile_id, self.session_id)
+                logger.info(f"[{self.session_id}] Profile connection session removed for profile {state.m3u_profile_id}")
             else:
                 if not state.m3u_profile_id:
                     logger.warning(f"[{self.session_id}] No profile ID in connection state - cannot decrement profile connections")
@@ -751,58 +751,82 @@ class MultiWorkerVODConnectionManager:
 
     def _get_profile_connections_key(self, profile_id: int) -> str:
         """Get Redis key for tracking connections per profile - STANDARDIZED with TS proxy"""
-        return f"profile_connections:{profile_id}"
+        return f"profile_connections:{profile_id}:zset"
+
+    def _check_profile_count(self, m3u_profile_id: int) -> int:
+        """Get active connection count for profile after purging expired ones"""
+        if not self.redis_client:
+            return 0
+        try:
+            key = self._get_profile_connections_key(m3u_profile_id)
+            current_time = time.time()
+            # Atomic purge and count
+            pipeline = self.redis_client.pipeline()
+            pipeline.zremrangebyscore(key, "-inf", current_time)
+            pipeline.zcard(key)
+            _, count = pipeline.execute()
+            return int(count)
+        except Exception as e:
+            logger.error(f"Error checking profile count: {e}")
+            return 0
 
     def _check_profile_limits(self, m3u_profile) -> bool:
         """Check if profile has available connection slots"""
         if m3u_profile.max_streams == 0:  # Unlimited
             return True
 
-        try:
-            profile_connections_key = self._get_profile_connections_key(m3u_profile.id)
-            current_connections = int(self.redis_client.get(profile_connections_key) or 0)
+        current_connections = self._check_profile_count(m3u_profile.id)
+        logger.info(f"[PROFILE-CHECK] Profile {m3u_profile.id} has {current_connections}/{m3u_profile.max_streams} connections")
+        return current_connections < m3u_profile.max_streams
 
-            logger.info(f"[PROFILE-CHECK] Profile {m3u_profile.id} has {current_connections}/{m3u_profile.max_streams} connections")
-            return current_connections < m3u_profile.max_streams
-
-        except Exception as e:
-            logger.error(f"Error checking profile limits: {e}")
-            return False
-
-    def _check_and_reserve_profile_slot(self, m3u_profile) -> bool:
+    def _check_and_reserve_profile_slot(self, m3u_profile, session_id: str) -> bool:
         """
-        Atomically check and reserve a connection slot for the given profile.
-
-        Uses an INCR-first-then-check pattern to eliminate the TOCTOU race
-        condition where separate GET > check > INCR operations could allow
-        concurrent requests to both pass the capacity check.
-
-        For profiles with max_streams=0 (unlimited), no reservation is needed.
-
-        Returns:
-            bool: True if slot was reserved (or unlimited), False if at capacity
+        Atomically check and reserve a connection slot using ZSET heartbeat pattern.
         """
         if m3u_profile.max_streams == 0:  # Unlimited
             return True
 
+        if not session_id:
+            logger.warning("[PROFILE-RESERVE] No session_id provided, cannot reserve slot")
+            return False
+
         try:
-            profile_connections_key = self._get_profile_connections_key(m3u_profile.id)
+            key = self._get_profile_connections_key(m3u_profile.id)
+            current_time = time.time()
+            expiry_time = current_time + 60  # 60s heartbeat
 
-            # Atomically increment first — single Redis command eliminates race window
-            new_count = self.redis_client.incr(profile_connections_key)
+            # Atomic check-and-set using Lua or Pipeline
+            # We'll use a pipeline for simplicity as ZCARD is fast
+            pipeline = self.redis_client.pipeline()
+            pipeline.zremrangebyscore(key, "-inf", current_time)
+            pipeline.zcard(key)
+            pipeline.execute() # Just to be sure we have current count
 
-            if new_count <= m3u_profile.max_streams:
-                logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved: {new_count}/{m3u_profile.max_streams}")
+            count = self._check_profile_count(m3u_profile.id)
+            
+            if count < m3u_profile.max_streams:
+                self.redis_client.zadd(key, {session_id: expiry_time})
+                logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved for session {session_id}: {count + 1}/{m3u_profile.max_streams}")
                 return True
 
-            # Over capacity — roll back the increment
-            self.redis_client.decr(profile_connections_key)
-            logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: {new_count - 1}/{m3u_profile.max_streams}")
+            logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: {count}/{m3u_profile.max_streams}")
             return False
 
         except Exception as e:
             logger.error(f"Error reserving profile slot: {e}")
             return False
+
+    def _refresh_profile_heartbeat(self, m3u_profile_id: int, session_id: str):
+        """Renew the heartbeat for a session in the profile connections zset"""
+        if not self.redis_client or not session_id:
+            return
+        try:
+            key = self._get_profile_connections_key(m3u_profile_id)
+            expiry_time = time.time() + 60
+            self.redis_client.zadd(key, {session_id: expiry_time})
+            logger.debug(f"[PROFILE-HEARTBEAT] Refreshed heartbeat for session {session_id} (profile {m3u_profile_id})")
+        except Exception as e:
+            logger.error(f"Error refreshing profile heartbeat: {e}")
 
     def _increment_profile_connections(self, m3u_profile):
         """Increment profile connection count"""
@@ -815,22 +839,18 @@ class MultiWorkerVODConnectionManager:
             logger.error(f"Error incrementing profile connections: {e}")
             return None
 
-    def _decrement_profile_connections(self, m3u_profile_id: int):
-        """Decrement profile connection count with atomic fallback for negative values"""
+    def _decrement_profile_connections(self, m3u_profile_id: int, session_id: str):
+        """Remove session from profile connection tracking (ZSET)"""
         try:
+            if not session_id:
+                logger.warning(f"[PROFILE-DECR] No session_id provided for profile {m3u_profile_id}")
+                return
+
             profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
-            new_count = self.redis_client.decr(profile_connections_key)
-
-            if new_count < 0:
-                self.redis_client.set(profile_connections_key, 0)
-                logger.warning(f"[PROFILE-DECR] Reset connection counter for profile {m3u_profile_id} (was negative: {new_count})")
-                return 0
-
-            logger.info(f"[PROFILE-DECR] Profile {m3u_profile_id} connections: {new_count}")
-            return new_count
+            self.redis_client.zrem(profile_connections_key, session_id)
+            logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id}")
         except Exception as e:
             logger.error(f"Error decrementing profile connections: {e}")
-            return None
 
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
@@ -887,8 +907,7 @@ class MultiWorkerVODConnectionManager:
             if not existing_state:
                 logger.info(f"[{client_id}] Worker {self.worker_id} - Creating new Redis-backed connection")
 
-                # Atomically check and reserve a profile connection slot (INCR-first)
-                if not self._check_and_reserve_profile_slot(m3u_profile):
+                if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
                     logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded")
                     return HttpResponse("Connection limit exceeded for profile", status=429)
                 profile_connections_incremented = True
@@ -955,7 +974,7 @@ class MultiWorkerVODConnectionManager:
                 if matching_session_id:
                     # Idle session reuse: active_streams already incremented at line 776
                     # Always need to re-reserve profile slot (GeneratorExit DECRed it)
-                    if not self._check_and_reserve_profile_slot(m3u_profile):
+                    if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
                         logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded on session reuse")
                         redis_connection.decrement_active_streams()
                         return HttpResponse("Connection limit exceeded for profile", status=429)
@@ -966,7 +985,7 @@ class MultiWorkerVODConnectionManager:
                     if new_count == 1:
                         # 0→1 transition: previous stream's GeneratorExit already DECRed
                         # the profile counter, need to re-reserve the slot
-                        if not self._check_and_reserve_profile_slot(m3u_profile):
+                        if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
                             logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded on reconnect")
                             redis_connection.decrement_active_streams()
                             return HttpResponse("Connection limit exceeded for profile", status=429)
@@ -1003,7 +1022,7 @@ class MultiWorkerVODConnectionManager:
                     # Roll back the active_streams increment from the else branch
                     redis_connection.decrement_active_streams()
                 if profile_connections_incremented:
-                    self._decrement_profile_connections(m3u_profile.id)
+                    self._decrement_profile_connections(m3u_profile.id, effective_session_id)
                     profile_connections_incremented = False
                 return HttpResponse("Requested Range Not Satisfiable", status=416)
 
@@ -1047,6 +1066,9 @@ class MultiWorkerVODConnectionManager:
                                     self.redis_client.delete(stop_key)
                                     stop_signal_detected = True
                                     break
+                                
+                                # Heartbeat renewal: every 100 chunks (~0.8MB at 8KB chunks)
+                                self._refresh_profile_heartbeat(m3u_profile.id, effective_session_id)
 
                                 # Update the connection state
                                 logger.debug(f"Client: [{client_id}] Worker: {self.worker_id} sent {chunk_count} chunks for VOD: {content_name}")
@@ -1074,8 +1096,8 @@ class MultiWorkerVODConnectionManager:
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
-                            self._decrement_profile_connections(profile_id)
-                            logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} on normal completion")
+                            self._decrement_profile_connections(profile_id, effective_session_id)
+                            logger.info(f"[{client_id}] Profile session {effective_session_id} removed on normal completion")
 
                         def delayed_cleanup():
                             time.sleep(1)  # Wait 1 second
@@ -1101,8 +1123,8 @@ class MultiWorkerVODConnectionManager:
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
-                            self._decrement_profile_connections(profile_id)
-                            logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} on client disconnect")
+                            self._decrement_profile_connections(profile_id, effective_session_id)
+                            logger.info(f"[{client_id}] Profile session {effective_session_id} removed on client disconnect")
 
                         def delayed_cleanup():
                             time.sleep(1)  # Wait 1 second
@@ -1127,8 +1149,8 @@ class MultiWorkerVODConnectionManager:
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
-                            self._decrement_profile_connections(profile_id)
-                            logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} on stream error")
+                            self._decrement_profile_connections(profile_id, effective_session_id)
+                            logger.info(f"[{client_id}] Profile session {effective_session_id} removed on stream error")
                         # Smart cleanup on error - immediate cleanup since we're in error state
                         # No connection_manager — profile already decremented above
                         redis_connection.cleanup(current_worker_id=self.worker_id)
@@ -1230,7 +1252,7 @@ class MultiWorkerVODConnectionManager:
             # Decrement profile connections if we incremented them but failed before streaming started
             if profile_connections_incremented:
                 logger.info(f"[{client_id}] Connection error occurred after profile increment - decrementing profile connections")
-                self._decrement_profile_connections(m3u_profile.id)
+                self._decrement_profile_connections(m3u_profile.id, effective_session_id)
 
                 # Also clean up the Redis connection state since we won't be using it
                 # Pass connection_manager=None since we already decremented above
@@ -1325,6 +1347,30 @@ class MultiWorkerVODConnectionManager:
 
         # The cleanup method now handles all Redis keys including session data
 
+    def cleanup_all_profile_heartbeats(self):
+        """Clean up expired heartbeats from ALL profile connection zsets"""
+        if not self.redis_client:
+            return
+        try:
+            pattern = "profile_connections:*:zset"
+            cursor = 0
+            current_time = time.time()
+            total_purged = 0
+
+            while True:
+                cursor, keys = self.redis_client.scan(cursor, match=pattern, count=100)
+                for key in keys:
+                    purged = self.redis_client.zremrangebyscore(key, "-inf", current_time)
+                    total_purged += purged
+
+                if cursor == 0:
+                    break
+
+            if total_purged > 0:
+                logger.info(f"[PROFILE-CLEANUP] Purged {total_purged} expired profile connection heartbeats")
+        except Exception as e:
+            logger.error(f"Error during all-profile heartbeat cleanup: {e}")
+
     def cleanup_stale_persistent_connections(self, max_age_seconds: int = 1800):
         """Clean up stale Redis-backed persistent connections"""
         if not self.redis_client:
@@ -1401,8 +1447,8 @@ class MultiWorkerVODConnectionManager:
             return False
 
         try:
-            # Check profile connection limits using atomic INCR-first pattern
-            if not self._check_and_reserve_profile_slot(m3u_profile):
+            # Check profile connection limits using atomic ZSET heartbeat pattern
+            if not self._check_and_reserve_profile_slot(m3u_profile, client_id):
                 logger.warning(f"Profile {m3u_profile.name} connection limit exceeded")
                 return False
 
@@ -1472,8 +1518,8 @@ class MultiWorkerVODConnectionManager:
                     pipe.srem(content_connections_key, client_id)
                     pipe.execute()
 
-                    # Standardized decrement with atomic fallback
-                    self._decrement_profile_connections(int(profile_id))
+                    # Standardized decrement
+                    self._decrement_profile_connections(int(profile_id), client_id)
 
                     logger.info(f"Removed Redis-backed connection: {client_id}")
 

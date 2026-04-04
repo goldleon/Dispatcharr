@@ -11,6 +11,7 @@ from core.utils import RedisClient
 from apps.proxy.ts_proxy.channel_status import ChannelStatus
 from core.utils import send_websocket_update
 from apps.proxy.vod_proxy.connection_manager import get_connection_manager
+from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +64,26 @@ def fetch_channel_stats():
 
 @shared_task
 def cleanup_vod_connections():
-    """Clean up stale VOD connections"""
+    """Clean up stale VOD connections (Consolidated and Legacy)"""
     try:
+        # Legacy manager cleanup
         connection_manager = get_connection_manager()
-        connection_manager.cleanup_stale_connections(max_age_seconds=3600)  # 1 hour
+        connection_manager.cleanup_stale_connections(max_age_seconds=1800)  # 30 mins
+        
+        # Multi-worker manager cleanup
+        mw_manager = MultiWorkerVODConnectionManager.get_instance()
+        mw_manager.cleanup_stale_persistent_connections(max_age_seconds=1800)
+        
         logger.info("VOD connection cleanup completed")
     except Exception as e:
         logger.error(f"Error in VOD connection cleanup: {e}", exc_info=True)
+
+@shared_task
+def cleanup_vod_heartbeats():
+    """Clean up expired profile connection heartbeats (ZSET)"""
+    try:
+        mw_manager = MultiWorkerVODConnectionManager.get_instance()
+        mw_manager.cleanup_all_profile_heartbeats()
+        logger.info("VOD profile heartbeat cleanup completed")
+    except Exception as e:
+        logger.error(f"Error in VOD heartbeat cleanup: {e}", exc_info=True)

@@ -272,6 +272,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.m3u.tasks.check_account_expirations",
         "schedule": 86400.0,  # Once every 24 hours
     },
+    "cleanup-vod-connections": {
+        "task": "apps.proxy.tasks.cleanup_vod_connections",
+        "schedule": 1800.0,  # Every 30 minutes
+    },
+    "cleanup-vod-heartbeats": {
+        "task": "apps.proxy.tasks.cleanup_vod_heartbeats",
+        "schedule": 60.0,  # Every 1 minute
+    },
 }
 
 MEDIA_ROOT = BASE_DIR / "media"
