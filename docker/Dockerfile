@@ -1,4 +1,5 @@
 # Define base image build arguments (must be before any FROM)
+ARG REGISTRY=ghcr.io/
 ARG REPO_OWNER=dispatcharr
 ARG REPO_NAME=dispatcharr
 ARG BASE_TAG=base
@@ -16,12 +17,13 @@ RUN    npm run build; \
     rm -rf node_modules .cache
 
 # --- Redeclare build arguments for the next stage ---
+ARG REGISTRY
 ARG REPO_OWNER
 ARG REPO_NAME
 ARG BASE_TAG
 
 # --- Final image based on the dynamic base ---
-FROM ghcr.io/${REPO_OWNER}/${REPO_NAME}:${BASE_TAG} AS final
+FROM ${REGISTRY}${REPO_OWNER}/${REPO_NAME}:${BASE_TAG} AS final
 ENV VIRTUAL_ENV=/dispatcharrpy
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 WORKDIR /app
