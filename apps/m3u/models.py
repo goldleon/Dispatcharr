@@ -1,12 +1,12 @@
 from datetime import datetime, timezone
 from django.db import models
 from django.core.exceptions import ValidationError
-from core.models import UserAgent
+from core.models import UserAgent, CoreSettings
+from core.utils import RedisClient
 import re
 from django.dispatch import receiver
 from apps.channels.models import StreamProfile
 from django_celery_beat.models import PeriodicTask
-from core.models import CoreSettings, UserAgent, RedisClient
 
 CUSTOM_M3U_ACCOUNT_NAME = "custom"
 
