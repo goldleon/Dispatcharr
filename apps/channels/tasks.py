@@ -11,6 +11,7 @@ import signal
 from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta
 import gc
+from django.utils import timezone
 
 from celery import shared_task
 from django.utils.text import slugify
@@ -1772,7 +1773,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
         cp = recording_obj.custom_properties or {}
         cp.update({
             "status": "recording",
-            "started_at": str(datetime.now()),
+            "started_at": str(timezone.now()),
         })
         # Provide a predictable playback URL for the frontend
         cp["file_url"] = f"/api/channels/recordings/{recording_id}/file/"
@@ -2123,7 +2124,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                 cp_now = recording_obj.custom_properties or {}
                 cp_now.update({
                     "status": "interrupted",
-                    "ended_at": str(datetime.now()),
+                    "ended_at": str(timezone.now()),
                     "file_name": filename or cp_now.get("file_name"),
                     "file_path": final_path or cp_now.get("file_path"),
                     "interrupted_reason": interrupted_reason,
@@ -2428,7 +2429,7 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
         # Re-read from DB to get the latest status (stop endpoint may have set it)
         recording_obj.refresh_from_db()
         cp = recording_obj.custom_properties or {}
-        cp["ended_at"] = str(datetime.now())
+        cp["ended_at"] = str(timezone.now())
 
         # Final status priority: stopped > completed > interrupted.
         # "stopped" is set by the stop endpoint before stream teardown, so
