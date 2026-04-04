@@ -19,12 +19,20 @@ class IsStandardUser(Authenticated):
         return request.user and request.user.user_level >= User.UserLevel.STANDARD
 
 
+def is_admin_user(user):
+    """
+    Check if a user has admin privileges.
+    This replaces scattered user_level >= 10, is_staff, and is_superuser checks.
+    """
+    return bool(user and user.is_authenticated and user.user_level >= 10)
+
+
 class IsAdmin(Authenticated):
     def has_permission(self, request, view):
         if not super().has_permission(request, view):
             return False
 
-        return request.user.user_level >= 10
+        return is_admin_user(request.user)
 
 
 class IsOwnerOfObject(Authenticated):

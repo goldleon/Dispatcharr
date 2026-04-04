@@ -1,3 +1,4 @@
+from apps.accounts.permissions import is_admin_user
 import ipaddress
 from django.http import HttpResponse, JsonResponse, Http404, HttpResponseForbidden, StreamingHttpResponse
 from rest_framework.response import Response
@@ -128,7 +129,7 @@ def generate_m3u(request, profile_name=None, user=None):
             return HttpResponseForbidden("POST requests with body are not allowed, body is: {}".format(request.body.decode()))
 
     if user is not None:
-        if user.user_level < 10:
+        if not is_admin_user(user):
             user_profile_count = user.channel_profiles.count()
 
             # If user has ALL profiles or NO profiles, give unrestricted access
@@ -1291,7 +1292,7 @@ def generate_epg(request, profile_name=None, user=None):
 
         # Get channels based on user/profile
         if user is not None:
-            if user.user_level < 10:
+            if not is_admin_user(user):
                 user_profile_count = user.channel_profiles.count()
 
                 # If user has ALL profiles or NO profiles, give unrestricted access
@@ -2132,7 +2133,7 @@ def xc_get_live_categories(user):
     from django.db.models import Min
     response = []
 
-    if user.user_level < 10:
+    if not is_admin_user(user):
         user_profile_count = user.channel_profiles.count()
 
         # If user has ALL profiles or NO profiles, give unrestricted access
@@ -2169,7 +2170,7 @@ def xc_get_live_categories(user):
 def xc_get_live_streams(request, user, category_id=None):
     streams = []
 
-    if user.user_level < 10:
+    if not is_admin_user(user):
         user_profile_count = user.channel_profiles.count()
 
         # If user has ALL profiles or NO profiles, give unrestricted access
@@ -2267,7 +2268,7 @@ def xc_get_epg(request, user, short=False):
         raise Http404()
 
     channel = None
-    if user.user_level < 10:
+    if not is_admin_user(user):
         user_profile_count = user.channel_profiles.count()
 
         # If user has ALL profiles or NO profiles, give unrestricted access
