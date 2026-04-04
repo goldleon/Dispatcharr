@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Updated `requests` 2.32.5 → 2.33.0, resolving CVE-2026-25645 (moderate): insecure temp file reuse in a utility function.
+- Updated frontend npm dependencies to resolve 4 audit vulnerabilities (2 moderate, 2 high):
+  - `brace-expansion` 5.0.2 → 5.0.5 — resolves moderate zero-step sequence causing process hang and memory exhaustion (GHSA-f886-m6hf-6m8v)
+  - `flatted` 3.4.1 → 3.4.2 — resolves high Prototype Pollution via parse() (GHSA-rf6f-7fwh-wjgh)
+  - `picomatch` 4.0.3 → 4.0.4 — resolves high method injection in POSIX character classes (GHSA-3v7f-55p6-f55p) and a ReDoS vulnerability via extglob quantifiers (GHSA-c2c7-rcm5-vvqj)
+  - `yaml` 1.10.2 → 1.10.3 — resolves moderate stack overflow via deeply nested YAML collections (GHSA-48c2-rrv3-qjmp)
+
 ## [0.22.2] - 2026-04-04
 
 ### Added
