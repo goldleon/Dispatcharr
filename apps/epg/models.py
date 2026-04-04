@@ -27,7 +27,7 @@ class EPGSource(models.Model):
         (STATUS_DISABLED, 'Disabled'),
     ]
 
-    name = models.CharField(max_length=255, unique=True)
+    name = models.TextField(unique=True)
     source_type = models.CharField(max_length=20, choices=SOURCE_TYPE_CHOICES)
     url = models.URLField(max_length=1000, blank=True, null=True)  # For XMLTV
     api_key = models.CharField(max_length=255, blank=True, null=True)  # For Schedules Direct
@@ -136,7 +136,7 @@ class EPGSource(models.Model):
 class EPGData(models.Model):
     # Removed the Channel foreign key. We now just store the original tvg_id
     # and a name (which might simply be the tvg_id if no real channel exists).
-    tvg_id = models.CharField(max_length=255, null=True, blank=True, db_index=True)
+    tvg_id = models.TextField(null=True, blank=True, db_index=True)
     name = models.TextField()
     icon_url = models.URLField(max_length=500, null=True, blank=True)
     epg_source = models.ForeignKey(
@@ -161,7 +161,7 @@ class ProgramData(models.Model):
     title = models.TextField()
     sub_title = models.TextField(blank=True, null=True)
     description = models.TextField(blank=True, null=True)
-    tvg_id = models.CharField(max_length=255, null=True, blank=True)
+    tvg_id = models.TextField(null=True, blank=True)
     custom_properties = models.JSONField(default=dict, blank=True, null=True)
 
     def __str__(self):
