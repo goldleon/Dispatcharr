@@ -723,11 +723,7 @@ class ChannelStream(models.Model):
 
     class Meta:
         ordering = ["order"]  # Ensure streams are retrieved in order
-        constraints = [
-            models.UniqueConstraint(
-                fields=["channel", "stream"], name="unique_channel_stream"
-            )
-        ]
+        unique_together = ("channel", "stream")
 
 
 class ChannelGroupM3UAccount(models.Model):
