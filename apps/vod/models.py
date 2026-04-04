@@ -285,7 +285,10 @@ class M3UEpisodeRelation(models.Model):
     class Meta:
         verbose_name = 'M3U Episode Relation'
         verbose_name_plural = 'M3U Episode Relations'
-        unique_together = [('m3u_account', 'stream_id')]
+        unique_together = [
+            ('m3u_account', 'stream_id'),
+            ('m3u_account', 'episode'),
+        ]
 
     def __str__(self):
         return f"{self.m3u_account.name} - {self.episode}"
