@@ -671,19 +671,21 @@ def send_notification_dismissed(notification_key):
         logger.error(f"Failed to send notification dismissed event: {e}")
 
 # Header privacy and spoofing protection
+# Keys stored in lowercase so case-insensitive comparison works correctly.
+# Note: .title() does NOT preserve acronyms (CF-Ray → Cf-Ray) so we use .lower() instead.
 HEADERS_TO_STRIP = frozenset({
-    'X-Forwarded-For',
-    'X-Forwarded-Host',
-    'X-Forwarded-Proto',
-    'X-Real-IP',
-    'Forwarded',
-    'Via',
-    'True-Client-IP',
-    'X-Client-IP',
-    'CF-Connecting-IP',
-    'CF-Ray',
-    'CF-Visitor',
-    'CF-IPCountry',
+    'x-forwarded-for',
+    'x-forwarded-host',
+    'x-forwarded-proto',
+    'x-real-ip',
+    'forwarded',
+    'via',
+    'true-client-ip',
+    'x-client-ip',
+    'cf-connecting-ip',
+    'cf-ray',
+    'cf-visitor',
+    'cf-ipcountry',
 })
 
 def build_upstream_headers(base_headers: dict = None, user_agent: str = None) -> dict:
@@ -703,11 +705,10 @@ def build_upstream_headers(base_headers: dict = None, user_agent: str = None) ->
     if base_headers:
         headers.update(base_headers)
         
-    # Strip identifying headers (using case-insensitive comparison)
-    # requests/urllib3 usually handle this, but being explicit here
+    # Strip identifying headers using case-insensitive comparison
     stripped_headers = {}
     for k, v in headers.items():
-        if k.title() not in HEADERS_TO_STRIP:
+        if k.lower() not in HEADERS_TO_STRIP:
             stripped_headers[k] = v
             
     return stripped_headers

@@ -17,6 +17,7 @@ from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.proxy.vod_proxy.connection_manager import VODConnectionManager
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager, infer_content_type_from_url, get_vod_client_stop_key, ProviderConnectionLimitError
 from .utils import get_client_info, create_vod_response
+from core.utils import build_upstream_headers
 
 logger = logging.getLogger(__name__)
 
@@ -309,15 +310,23 @@ class VODStreamView(View):
             # Make a small range GET request to get content length since providers don't support HEAD
             # We'll use a tiny range to minimize data transfer but get the headers we need
             # Use M3U account's user agent as primary, client user agent as fallback
-            m3u_user_agent = m3u_account.get_user_agent().user_agent if m3u_account.get_user_agent() else None
-            headers = {
-                'User-Agent': m3u_user_agent or client_user_agent or 'Dispatcharr/1.0',
-                'Accept': '*/*',
-                'Range': 'bytes=0-1'  # Request only first 2 bytes
-            }
+            m3u_ua_obj = m3u_account.get_user_agent()
+            m3u_user_agent = m3u_ua_obj.user_agent if m3u_ua_obj else None
+            probe_headers = build_upstream_headers(
+                base_headers={
+                    'Accept': '*/*',
+                    'Range': 'bytes=0-1',  # Request only first 2 bytes
+                },
+                user_agent=m3u_user_agent or client_user_agent or 'Dispatcharr/1.0',
+            )
+
+            # Respect ssl_verify from stream profile (same as main streaming path)
+            head_ssl_verify = True
+            if m3u_profile.m3u_account and m3u_profile.m3u_account.stream_profile:
+                head_ssl_verify = m3u_profile.m3u_account.stream_profile.ssl_verify
 
             logger.info(f"[VOD-HEAD] Making small range GET request to provider: {final_stream_url}")
-            response = requests.get(final_stream_url, headers=headers, timeout=30, allow_redirects=True, stream=True)
+            response = requests.get(final_stream_url, headers=probe_headers, timeout=30, allow_redirects=True, stream=True, verify=head_ssl_verify)
 
             # Check for range support - should be 206 for partial content
             if response.status_code == 206:

@@ -608,6 +608,9 @@ class ChannelViewSet(viewsets.ModelViewSet):
             # Filter channels that have at least one related stream marked as stale
             q_filters &= Q(streams__is_stale=True)
 
+        # NOTE: this is NOT an admin gate — it restricts channel query results
+        # to channels at or below the requesting user's access tier.
+        # Do NOT replace with is_admin_user(); that would break tiered channel visibility.
         if self.request.user.user_level < 10:
             filters["user_level__lte"] = self.request.user.user_level
             # Hide adult content if user preference is set

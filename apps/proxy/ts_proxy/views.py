@@ -558,6 +558,9 @@ def stream_xc(request, username, password, channel_id):
         return Response({"error": "Invalid credentials"}, status=401)
 
     print(f"Fetchin channel with ID: {channel_id}")
+    # NOTE: this is NOT an admin gate — it filters channel visibility by user
+    # access tier so non-admin users only see channels at or below their level.
+    # Do NOT replace with is_admin_user(); that would break tiered channel access.
     if user.user_level < 10:
         user_profile_count = user.channel_profiles.count()
 
