@@ -321,8 +321,13 @@ def fetch_xmltv(source):
         headers = build_upstream_headers(headers)
 
         # Update status to fetching before starting download
-        source.status = 'fetching'
-        source.save(update_fields=['status'])
+        try:
+            source.status = 'fetching'
+            source.save(update_fields=['status'])
+        except Exception as e:
+            logger.warning(f"Could not update status for source {source.id}: {e}")
+            # If the source object is gone from DB, we can't really continue updating it
+            return False
 
         # Send initial download notification
         send_epg_update(source.id, "downloading", 0)
@@ -333,9 +338,12 @@ def fetch_xmltv(source):
             if response.status_code == 404:
                 logger.error(f"EPG URL not found (404): {source.url}")
                 # Update status to error in the database
-                source.status = 'error'
-                source.last_message = f"EPG source '{source.name}' returned 404 error - will retry on next scheduled run"
-                source.save(update_fields=['status', 'last_message'])
+                try:
+                    source.status = 'error'
+                    source.last_message = f"EPG source '{source.name}' returned 404 error - will retry on next scheduled run"
+                    source.save(update_fields=['status', 'last_message'])
+                except Exception as e:
+                    logger.warning(f"Could not save 404 error status to source {source.id}: {e}")
 
                 # Notify users through the WebSocket about the EPG fetch failure
                 channel_layer = get_channel_layer()

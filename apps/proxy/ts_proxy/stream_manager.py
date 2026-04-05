@@ -1059,9 +1059,11 @@ class StreamManager:
 
     def stop(self):
         """Stop the stream manager and cancel all timers"""
+        # Guard clause to prevent redundant stop calls
+        if getattr(self, 'stopping', False):
+            return
+            
         logger.info(f"Stopping stream manager for channel {self.channel_id}")
-
-        # Add at the beginning of your stop method
         self.stopping = True
 
         # Release stream resources if we're the owner

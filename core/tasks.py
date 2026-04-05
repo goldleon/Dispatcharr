@@ -12,6 +12,7 @@ from apps.m3u.models import M3UAccount
 from apps.epg.models import EPGSource
 from apps.m3u.tasks import refresh_single_m3u_account
 from apps.epg.tasks import refresh_epg_data
+from apps.proxy.tasks import reconcile_profile_connections
 from .models import CoreSettings
 from apps.channels.models import Stream, ChannelStream
 from django.db import transaction
@@ -51,6 +52,7 @@ def throttled_log(logger_method, message, key=None, *args, **kwargs):
 def beat_periodic_task():
     fetch_channel_stats()
     scan_and_process_files()
+    reconcile_profile_connections.delay()
 
 @shared_task
 def scan_and_process_files():
@@ -808,7 +810,15 @@ def check_for_version_update():
                 return
 
             # Parse timestamps for comparison
-            local_dt = datetime.strptime(__timestamp__, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            # Handle both ISO-8601 (modern) and compact (legacy) formats for local build timestamp
+            try:
+                if 'T' in __timestamp__ or '-' in __timestamp__:
+                    local_dt = datetime.fromisoformat(__timestamp__.replace('Z', '+00:00'))
+                else:
+                    local_dt = datetime.strptime(__timestamp__, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            except (ValueError, AttributeError, TypeError) as e:
+                logger.error(f"Failed to parse build __timestamp__ '{__timestamp__}': {e}")
+                return
             docker_dt = datetime.fromisoformat(docker_last_updated.replace('Z', '+00:00'))
 
             # Calculate difference in minutes

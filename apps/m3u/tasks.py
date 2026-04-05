@@ -1116,7 +1116,12 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             extvlcopt = stream_info.get("extvlcopt", {})
             http_referrer = extvlcopt.pop("http-referrer", None)
             http_origin = extvlcopt.pop("http-origin", None)
+            # Pick up User-Agent if provided in M3U
+            ua_from_m3u = extvlcopt.pop("http-user-agent", None)
+            
             custom_headers = dict(extvlcopt) if extvlcopt else {}
+            if ua_from_m3u:
+                custom_headers["User-Agent"] = ua_from_m3u
 
             stream_props = {
                 "name": name,
@@ -1553,9 +1558,21 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
                     opt_content = line[len("#EXTVLCOPT:"):].strip()
                     if "=" in opt_content:
                         k, v = opt_content.split("=", 1)
+                        k_low = k.strip().lower()
+                        v_val = v.strip()
+                        
                         if "extvlcopt" not in extinf_data[-1]:
                             extinf_data[-1]["extvlcopt"] = {}
-                        extinf_data[-1]["extvlcopt"][k.strip()] = v.strip()
+                        
+                        # Handle common aliases
+                        if k_low in ["http-referrer", "referrer"]:
+                            extinf_data[-1]["extvlcopt"]["http-referrer"] = v_val
+                        elif k_low in ["http-origin", "origin"]:
+                            extinf_data[-1]["extvlcopt"]["http-origin"] = v_val
+                        elif k_low in ["http-user-agent", "user-agent", "ua"]:
+                            extinf_data[-1]["extvlcopt"]["http-user-agent"] = v_val
+                        else:
+                            extinf_data[-1]["extvlcopt"][k.strip()] = v_val
 
             elif extinf_data and (line.startswith("http") or line.startswith("rtsp") or line.startswith("rtp") or line.startswith("udp")):
                 url_count += 1

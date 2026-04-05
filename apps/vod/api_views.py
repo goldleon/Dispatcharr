@@ -134,15 +134,21 @@ class MovieViewSet(viewsets.ReadOnlyModelViewSet):
             not relation.last_advanced_refresh or
             (now - relation.last_advanced_refresh).total_seconds() > 86400
         )
-
         if needs_refresh:
             # Trigger advanced data refresh
             logger.debug(f"Refreshing advanced data for movie {movie.id} (relation ID: {relation.id})")
             refresh_movie_advanced_data(relation.id, force_refresh=force_refresh)
 
-            # Refresh objects from database after task completion
-            movie.refresh_from_db()
-            relation.refresh_from_db()
+            # Refresh objects from database after task completion with safety guards
+            try:
+                movie.refresh_from_db()
+                relation.refresh_from_db()
+            except Exception as e:
+                logger.error(f"Failed to refresh movie/relation from DB: {e}")
+                return Response(
+                    {'error': 'Content or relation was removed during refresh'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
 
         # Use refreshed data from database
         custom_props = relation.custom_properties or {}
@@ -361,8 +367,15 @@ class SeriesViewSet(viewsets.ReadOnlyModelViewSet):
                 account = relation.m3u_account
                 if account and account.is_active:
                     refresh_series_episodes(account, series, relation.external_series_id)
-                    series.refresh_from_db()  # Reload from database after refresh
-                    relation.refresh_from_db()  # Reload relation too
+                    try:
+                        series.refresh_from_db()  # Reload from database after refresh
+                        relation.refresh_from_db()  # Reload relation too
+                    except Exception as e:
+                        logger.error(f"Failed to refresh series/relation from DB: {e}")
+                        return Response(
+                            {'error': 'Series or relation was removed during refresh'},
+                            status=status.HTTP_404_NOT_FOUND
+                        )
 
             # Return the database data (which should now be fresh)
             custom_props = relation.custom_properties or {}

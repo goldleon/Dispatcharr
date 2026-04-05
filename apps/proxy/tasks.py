@@ -12,6 +12,8 @@ from apps.proxy.ts_proxy.channel_status import ChannelStatus
 from core.utils import send_websocket_update
 from apps.proxy.vod_proxy.connection_manager import get_connection_manager
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager
+from apps.m3u.models import M3UAccountProfile
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -87,3 +89,117 @@ def cleanup_vod_heartbeats():
         logger.info("VOD profile heartbeat cleanup completed")
     except Exception as e:
         logger.error(f"Error in VOD heartbeat cleanup: {e}", exc_info=True)
+
+@shared_task
+def reconcile_profile_connections():
+    """
+    Periodic task to reconcile Redis connection counters with actual active sessions.
+    Handles both Live (TS) and VOD (Multi-Worker) streams.
+    Runs every 5 minutes (configured in Celery Beat).
+    """
+    redis_client = RedisClient.get_client()
+    if not redis_client:
+        return "Redis not available"
+
+    try:
+        # profile_id -> count
+        total_counts = {}
+
+        # 1. Reconcile Live (TS Proxy) Streams
+        # Pattern: stream_profile:{channel_id} -> profile_id
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor, match="stream_profile:*", count=100)
+            for key in keys:
+                try:
+                    ch_id = key.split(':')[1]
+                    # Check if the channel metadata still exists (is the stream actually running?)
+                    meta_key = f"ts_proxy:channel:{ch_id}:metadata"
+                    if not redis_client.exists(meta_key):
+                        logger.warning(f"Reconciliation: Cleaning up orphaned stream_profile key for inactive channel {ch_id}")
+                        redis_client.delete(key)
+                        continue
+
+                    profile_id_raw = redis_client.get(key)
+                    if profile_id_raw:
+                        p_id = int(profile_id_raw)
+                        total_counts[p_id] = total_counts.get(p_id, 0) + 1
+                except (IndexError, ValueError, TypeError) as e:
+                    logger.error(f"Error processing stream_profile key {key}: {e}")
+            
+            if cursor == 0:
+                break
+
+        # 2. Reconcile VOD Streams (using heartbeat ZSETs from MultiWorkerVODConnectionManager)
+        # Pattern: profile_connections:{profile_id}:zset
+        cursor = 0
+        current_time = time.time()
+        while True:
+            cursor, keys = redis_client.scan(cursor, match="profile_connections:*:zset", count=100)
+            for key in keys:
+                try:
+                    # Key is profile_connections:{id}:zset
+                    p_id = int(key.split(':')[1])
+                    
+                    # Purge expired heartbeats (score is timestamp when they expire or last update)
+                    # Note: MW manager uses score = current_time + 60
+                    # We purge members older than current_time
+                    redis_client.zremrangebyscore(key, "-inf", current_time)
+                    vod_count = redis_client.zcard(key) or 0
+                    
+                    if vod_count > 0:
+                        total_counts[p_id] = total_counts.get(p_id, 0) + vod_count
+                except (IndexError, ValueError, TypeError) as e:
+                    logger.error(f"Error processing VOD zset key {key}: {e}")
+            
+            if cursor == 0:
+                break
+
+        # 3. Synchronize with Database and Update Redis Counters
+        active_profiles = M3UAccountProfile.objects.filter(is_active=True)
+        synced_count = 0
+        
+        # Track which profiles we updated to handle those that dropped to 0
+        processed_ids = set()
+
+        for profile in active_profiles:
+            actual_count = total_counts.get(profile.id, 0)
+            processed_ids.add(profile.id)
+            
+            # Update Redis counter (the one used for INCR/DECR locks)
+            redis_client.set(f"profile_connections:{profile.id}", actual_count)
+            
+            # Update DB field if changed
+            if profile.active_streams != actual_count:
+                logger.info(f"Reconciliation: Correcting profile {profile.id} count {profile.active_streams} -> {actual_count}")
+                profile.active_streams = actual_count
+                profile.save(update_fields=['active_streams'])
+                synced_count += 1
+
+        # 4. Handle orphaned profile_connections keys for non-existent or inactive profiles
+        # Scan for all profile_connections:{id} (non-zset)
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor, match="profile_connections:*", count=100)
+            for key in keys:
+                # Skip zset keys
+                if key.endswith(':zset'):
+                    continue
+                
+                try:
+                    p_id = int(key.split(':')[1])
+                    if p_id not in processed_ids:
+                        logger.debug(f"Reconciliation: Cleaning up orphaned counter for profile {p_id}")
+                        redis_client.delete(key)
+                except (IndexError, ValueError):
+                    continue
+            
+            if cursor == 0:
+                break
+
+        logger.info(f"Profile connection reconciliation complete. Updated {synced_count} profiles.")
+        return f"Reconciled {len(total_counts)} profiles, updated {synced_count} in DB."
+
+    except Exception as e:
+        logger.error(f"Critical error in reconcile_profile_connections: {e}", exc_info=True)
+        return f"Error: {str(e)}"
