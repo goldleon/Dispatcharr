@@ -109,53 +109,51 @@ class StreamManager:
         self.upstream_headers = {"User-Agent": user_agent}
 
         # Cache channel name and SSL verify setting to avoid repeated DB queries in hot paths
-        self.channel_name = channel_name
-        from apps.proxy.ts_proxy.cache import get_channel_name, get_channel_ssl_verify
-        self.channel_name = channel_name or get_channel_name(channel_id)
-        
-        try:
-            from core.models import Channel, Stream
-            self.ssl_verify = get_channel_ssl_verify(channel_id)
-            
-            # For headers, we currently still need the model to evaluate the custom ones
-            _channel_obj = Channel.objects.filter(uuid=channel_id).prefetch_related('channelgroup_set__m3u_accounts').first()
-            if _channel_obj:
-                _stream_profile = _channel_obj.get_stream_profile()
-            self.ssl_verify = getattr(_stream_profile, 'ssl_verify', True)
+        from apps.proxy.ts_proxy.cache import (
+            get_channel_name, get_channel_ssl_verify, get_stream_profile_data,
+            get_user_agent_data, get_stream_extra_data
+        )
 
-            # Apply full header bundle
-            if _stream_profile.user_agent:
-                if isinstance(_stream_profile.user_agent.headers, dict) and _stream_profile.user_agent.headers:
-                    self.upstream_headers.update(_stream_profile.user_agent.headers)
-                else:
-                    self.upstream_headers["User-Agent"] = _stream_profile.user_agent.user_agent
+        self.channel_name = channel_name or get_channel_name(channel_id)
+        self.ssl_verify = True  # Default
+
+        try:
+            profile_data = get_stream_profile_data(channel_id)
+            if profile_data:
+                self.ssl_verify = profile_data.get('ssl_verify', True)
+                
+                # Apply UserAgent bundle
+                ua_id = profile_data.get('user_agent_id')
+                if ua_id:
+                    ua_data = get_user_agent_data(ua_id)
+                    if ua_data:
+                        if ua_data.get('headers'):
+                            self.upstream_headers.update(ua_data['headers'])
+                        else:
+                            self.upstream_headers["User-Agent"] = ua_data['user_agent']
 
             # Stream specific headers
-            _stream_obj = None
             if stream_id:
-                try:
-                    _stream_obj = Stream.objects.get(id=stream_id)
-                except Exception:
-                    pass
+                stream_extra = get_stream_extra_data(stream_id)
+                if stream_extra:
+                    if stream_extra.get('http_referrer'):
+                        self.upstream_headers['Referer'] = stream_extra['http_referrer']
+                        # Default Origin to Referer base if not explicitly set
+                        if not stream_extra.get('http_origin'):
+                            from urllib.parse import urlparse
+                            p = urlparse(stream_extra['http_referrer'])
+                            self.upstream_headers['Origin'] = f"{p.scheme}://{p.netloc}"
 
-            if _stream_obj:
-                if getattr(_stream_obj, 'http_referrer', None):
-                    self.upstream_headers['Referer'] = _stream_obj.http_referrer
-                    # Default Origin to Referer base if not explicitly set
-                    if not getattr(_stream_obj, 'http_origin', None):
-                        from urllib.parse import urlparse
-                        p = urlparse(_stream_obj.http_referrer)
-                        self.upstream_headers['Origin'] = f"{p.scheme}://{p.netloc}"
+                    if stream_extra.get('http_origin'):
+                        self.upstream_headers['Origin'] = stream_extra['http_origin']
 
-                if getattr(_stream_obj, 'http_origin', None):
-                    self.upstream_headers['Origin'] = _stream_obj.http_origin
+                    if stream_extra.get('custom_headers'):
+                        self.upstream_headers.update(stream_extra['custom_headers'])
 
-                if getattr(_stream_obj, 'custom_headers', None):
-                    self.upstream_headers.update(_stream_obj.custom_headers)
         except Exception as e:
-            self.channel_name = str(channel_id)
-            self.ssl_verify = True  # Default to verifying SSL
-            logger.warning(f"Could not fully populate stream settings for {channel_id}: {e}")
+            logger.warning(f"Could not fully populate stream settings for {channel_id} from cache: {e}")
+            if not self.channel_name:
+                self.channel_name = str(channel_id)
 
         # Always strip client-identifying headers last
         self.upstream_headers = build_upstream_headers(self.upstream_headers)

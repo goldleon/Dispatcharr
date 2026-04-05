@@ -98,7 +98,8 @@ class SerializableConnectionState:
                  content_name: str = None, client_ip: str = None,
                  client_user_agent: str = None, utc_start: str = None,
                  utc_end: str = None, offset: str = None,
-                 worker_id: str = None, connection_type: str = "redis_backed"):
+                 worker_id: str = None, connection_type: str = "redis_backed",
+                 ssl_verify: bool = True):
         self.session_id = session_id
         self.stream_url = stream_url
         self.headers = headers
@@ -121,6 +122,7 @@ class SerializableConnectionState:
         self.offset = offset or ""
         self.worker_id = worker_id
         self.connection_type = connection_type
+        self.ssl_verify = ssl_verify
         self.created_at = time.time()
 
         # Additional tracking fields
@@ -157,6 +159,7 @@ class SerializableConnectionState:
             'offset': self.offset or '',
             'worker_id': self.worker_id or '',
             'connection_type': self.connection_type or 'redis_backed',
+            'ssl_verify': 'true' if self.ssl_verify else 'false',
             'created_at': str(self.created_at),
             # Additional tracking fields
             'bytes_sent': str(self.bytes_sent),
@@ -189,7 +192,8 @@ class SerializableConnectionState:
             utc_end=data.get('utc_end') or '',
             offset=data.get('offset') or '',
             worker_id=data.get('worker_id') or None,
-            connection_type=data.get('connection_type', 'redis_backed')
+            connection_type=data.get('connection_type', 'redis_backed'),
+            ssl_verify=data.get('ssl_verify', 'true').lower() == 'true'
         )
         obj.last_activity = float(data.get('last_activity', time.time()))
         obj.request_count = int(data.get('request_count', 0))
@@ -286,7 +290,7 @@ class RedisBackedVODConnection:
                          content_name: str = None, client_ip: str = None,
                          client_user_agent: str = None, utc_start: str = None,
                          utc_end: str = None, offset: str = None,
-                         worker_id: str = None) -> bool:
+                         worker_id: str = None, ssl_verify: bool = True) -> bool:
         """Create a new connection state in Redis with consolidated session metadata"""
         if not self._acquire_lock():
             logger.warning(f"[{self.session_id}] Could not acquire lock for connection creation")
@@ -314,7 +318,8 @@ class RedisBackedVODConnection:
                 utc_start=utc_start,
                 utc_end=utc_end,
                 offset=offset,
-                worker_id=worker_id
+                worker_id=worker_id,
+                ssl_verify=ssl_verify
             )
             success = self._save_connection_state(state)
 
@@ -368,7 +373,8 @@ class RedisBackedVODConnection:
                 headers=build_upstream_headers(headers),
                 stream=True,
                 timeout=(10, 10),
-                allow_redirects=allow_redirects
+                allow_redirects=allow_redirects,
+                verify=state.ssl_verify
             )
             if response.status_code == 458:
                 raise ProviderConnectionLimitError(
@@ -942,6 +948,21 @@ class MultiWorkerVODConnectionManager:
                 
                 headers = build_upstream_headers(headers)
 
+                # Get SSL verify setting from M3U profile or default profile
+                ssl_verify = True
+                if m3u_profile.m3u_account and m3u_profile.m3u_account.stream_profile:
+                    ssl_verify = m3u_profile.m3u_account.stream_profile.ssl_verify
+                else:
+                    # Fallback to default stream profile if account doesn't have one
+                    from core.models import CoreSettings, StreamProfile
+                    default_profile_id = CoreSettings.get_default_stream_profile_id()
+                    if default_profile_id:
+                        try:
+                            default_profile = StreamProfile.objects.get(id=default_profile_id)
+                            ssl_verify = default_profile.ssl_verify
+                        except:
+                            pass
+
                 # Create connection state in Redis with consolidated session metadata
                 if not redis_connection.create_connection(
                     stream_url=modified_stream_url,
@@ -956,7 +977,8 @@ class MultiWorkerVODConnectionManager:
                     utc_start=utc_start,
                     utc_end=utc_end,
                     offset=str(offset) if offset else None,
-                    worker_id=self.worker_id
+                    worker_id=self.worker_id,
+                    ssl_verify=ssl_verify
                 ):
                     logger.error(f"[{client_id}] Worker {self.worker_id} - Failed to create Redis connection")
                     # Roll back the profile slot reservation since connection failed
