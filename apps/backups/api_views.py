@@ -10,7 +10,7 @@ from django.http import HttpResponse, StreamingHttpResponse, Http404
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.permissions import AllowAny
-from apps.accounts.permissions import IsAdmin
+from apps.accounts.permissions import IsAdmin, is_admin_user
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 
@@ -87,7 +87,7 @@ def backup_status(request, task_id):
             )
     else:
         # Fall back to admin auth check
-        if not request.user.is_authenticated or getattr(request.user, 'user_level', 0) < 10:
+        if not is_admin_user(request.user):
             return Response(
                 {"detail": "Authentication required"},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -169,7 +169,7 @@ def download_backup(request, filename):
             )
     else:
         # Fall back to admin auth check
-        if not request.user.is_authenticated or getattr(request.user, 'user_level', 0) < 10:
+        if not is_admin_user(request.user):
             return Response(
                 {"detail": "Authentication required"},
                 status=status.HTTP_401_UNAUTHORIZED,
