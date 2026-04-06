@@ -387,6 +387,8 @@ def fetch_xmltv(source):
 
                 # Update status to error in the database
                 try:
+                    source.status = 'error'
+                    source.last_message = user_message
                     source.save(update_fields=['status', 'last_message'])
                 except Exception as e:
                     logger.warning(f"Could not save error status for source {source.id}: {e}")
@@ -584,6 +586,8 @@ def fetch_xmltv(source):
             user_message = f"EPG source '{source.name}' access denied (HTTP {status_code}) - check credentials"
         elif status_code == 429:
             user_message = f"EPG source '{source.name}' rate limited (429) - try again later"
+        elif status_code == 451:
+            user_message = f"EPG source '{source.name}' unavailable for legal reasons (451) - provider may restrict access in your region"
         elif status_code >= 500:
             user_message = f"EPG source '{source.name}' server error (HTTP {status_code}) - will retry later"
 

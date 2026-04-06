@@ -715,7 +715,9 @@ class RedisBackedVODConnection:
                 if not state.m3u_profile_id:
                     logger.warning(f"[{self.session_id}] No profile ID in connection state - cannot decrement profile connections")
                 elif not connection_manager:
-                    logger.warning(f"[{self.session_id}] No connection manager provided - cannot decrement profile connections")
+                    # Intentional: callers that handle profile decrement themselves call
+                    # cleanup() without a connection_manager after already decrementing.
+                    logger.debug(f"[{self.session_id}] cleanup() called without connection_manager - profile already decremented by caller")
 
         except Exception as e:
             logger.error(f"[{self.session_id}] Error cleaning up Redis state: {e}")
