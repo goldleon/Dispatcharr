@@ -463,7 +463,7 @@ class ProxyServer:
                 if channel_id in self.stream_managers:
                     acquired = self.redis_client.set(lock_key, self.worker_id, nx=True, ex=ttl)
                     if acquired:
-                        logger.warning(f"Re-acquired expired ownership for channel {channel_id}")
+                        logger.info(f"Re-acquired expired ownership for channel {channel_id}")
                         return True
                     else:
                         new_owner = self.redis_client.get(lock_key)
@@ -1211,7 +1211,7 @@ class ProxyServer:
                             # Safety: if we have a stream_manager, we ARE the real owner
                             # but the Redis key may have expired. Try to re-acquire.
                             if channel_id in self.stream_managers:
-                                logger.warning(
+                                logger.info(
                                     f"Ownership gap for {channel_id}: this worker has stream_manager "
                                     f"but am_i_owner returned False. Attempting re-acquisition."
                                 )

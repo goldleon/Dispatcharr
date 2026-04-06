@@ -697,8 +697,12 @@ class StreamManager:
                                 self._log_stderr_content(line_text)
                         buffer = b""
 
+                except ValueError:
+                    # stderr pipe was closed (FFmpeg exited) — expected on process exit
+                    logger.debug(f"stderr pipe closed for channel {self.channel_id} (process exited)")
+                    break
                 except Exception as e:
-                    logger.error(f"Error reading stderr byte: {e}")
+                    logger.debug(f"Error reading stderr byte for channel {self.channel_id}: {e}")
                     break
 
             # Process any remaining buffer content
