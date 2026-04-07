@@ -144,6 +144,7 @@ class ProxyServer:
             return
 
         def event_listener():
+            from django.db import connection
             retry_count = 0
             max_retries = 10
             base_retry_delay = 1  # Start with 1 second delay
@@ -212,7 +213,6 @@ class ProxyServer:
                                         logger.debug(f"Owner received {EventType.CLIENT_CONNECTED} event for channel {channel_id}")
                                         # Reset any disconnect timer
                                         try:
-                                            from django.db import connection
                                             disconnect_key = RedisKeys.last_client_disconnect(channel_id)
                                             self.redis_client.delete(disconnect_key)
                                         finally:
@@ -224,7 +224,6 @@ class ProxyServer:
                                         logger.debug(f"Owner received {EventType.CLIENT_DISCONNECTED} event for channel {channel_id}, client {client_id} from worker {worker_id}")
                                         # Delegate to dedicated method
                                         try:
-                                            from django.db import connection
                                             self.handle_client_disconnect(channel_id)
                                         finally:
                                             connection.close()
@@ -233,7 +232,6 @@ class ProxyServer:
                                         logger.info(f"Owner received {EventType.STREAM_SWITCH} request for channel {channel_id}")
                                         # Handle stream switch request
                                         try:
-                                            from django.db import connection
                                             new_url = data.get("url")
                                             user_agent = data.get("user_agent")
                                             self.switch_channel_stream(channel_id, new_url, user_agent)
@@ -1060,6 +1058,7 @@ class ProxyServer:
         """Start background thread to maintain ownership and clean up resources"""
         def cleanup_task():
             while True:
+                from django.db import connection
                 try:
                     # Send worker heartbeat first
                     if self.redis_client:
@@ -1307,7 +1306,6 @@ class ProxyServer:
                 if hasattr(self, '_last_orphan_check'):
                     if time.time() - self._last_orphan_check > 30:
                         try:
-                            from django.db import connection
                             self._check_orphaned_metadata()
                             self._last_orphan_check = time.time()
                         except Exception as orphan_error:
@@ -1316,7 +1314,11 @@ class ProxyServer:
                     self._last_orphan_check = time.time()
 
                 gevent.sleep(ConfigHelper.cleanup_check_interval())
-                connection.close()
+                try:
+                    connection.close()
+                except Exception:
+                    # connection might be unbound if import failed
+                    pass
 
         thread = threading.Thread(target=cleanup_task, daemon=True)
         thread.name = "ts-proxy-cleanup"
