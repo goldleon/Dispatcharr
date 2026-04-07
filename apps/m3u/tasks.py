@@ -2139,6 +2139,7 @@ def refresh_account_profiles(account_id):
     It includes rate limiting delays between profile authentications to prevent provider bans.
     """
     from django.conf import settings
+    from django.db import connection
     import time
 
     try:
@@ -2229,6 +2230,8 @@ def refresh_account_profiles(account_id):
         error_msg = f"Error refreshing profiles for account {account_id}: {str(e)}"
         logger.error(error_msg)
         return error_msg
+    finally:
+        connection.close()
 
 
 @shared_task
@@ -2238,105 +2241,109 @@ def refresh_account_info(profile_id):
         return f"Account info refresh task already running for profile_id={profile_id}."
 
     try:
-        from apps.m3u.models import M3UAccountProfile
-        import re
+        try:
+            from apps.m3u.models import M3UAccountProfile
+            import re
 
-        profile = M3UAccountProfile.objects.get(id=profile_id)
-        account = profile.m3u_account
+            profile = M3UAccountProfile.objects.get(id=profile_id)
+            account = profile.m3u_account
 
-        if account.account_type != M3UAccount.Types.XC:
-            release_task_lock("refresh_account_info", profile_id)
-            return f"Profile {profile_id} belongs to account {account.id} which is not an XtreamCodes account."
+            if account.account_type != M3UAccount.Types.XC:
+                release_task_lock("refresh_account_info", profile_id)
+                return f"Profile {profile_id} belongs to account {account.id} which is not an XtreamCodes account."
 
-        # Get transformed credentials using the helper function
-        transformed_url, transformed_username, transformed_password = get_transformed_credentials(account, profile)
+            # Get transformed credentials using the helper function
+            transformed_url, transformed_username, transformed_password = get_transformed_credentials(account, profile)
 
-        # Initialize XtreamCodes client with extracted/transformed credentials
-        client = XCClient(
-            transformed_url,
-            transformed_username,
-            transformed_password,
-            account.get_user_agent(),
-        )        # Authenticate and get account info
-        auth_result = client.authenticate()
-        if not auth_result:
-            error_msg = f"Authentication failed for profile {profile.name} ({profile_id})"
-            logger.error(error_msg)
+            # Initialize XtreamCodes client with extracted/transformed credentials
+            client = XCClient(
+                transformed_url,
+                transformed_username,
+                transformed_password,
+                account.get_user_agent(),
+            )
+            # Authenticate and get account info
+            auth_result = client.authenticate()
+            if not auth_result:
+                error_msg = f"Authentication failed for profile {profile.name} ({profile_id})"
+                logger.error(error_msg)
 
-            # Send error notification to frontend via websocket
+                # Send error notification to frontend via websocket
+                send_websocket_update(
+                    "updates",
+                    "update",
+                    {
+                        "type": "account_info_refresh_error",
+                        "profile_id": profile_id,
+                        "profile_name": profile.name,
+                        "error": "Authentication failed with the provided credentials",
+                        "message": f"Failed to authenticate profile '{profile.name}'. Please check the credentials."
+                    }
+                )
+
+                release_task_lock("refresh_account_info", profile_id)
+                return error_msg
+
+            # Get account information
+            account_info = client.get_account_info()
+
+            # Update only this specific profile with the new account info
+            if not profile.custom_properties:
+                profile.custom_properties = {}
+            profile.custom_properties.update(account_info)
+            profile.save()
+
+            # Send success notification to frontend via websocket
             send_websocket_update(
                 "updates",
                 "update",
                 {
-                    "type": "account_info_refresh_error",
+                    "type": "account_info_refresh_success",
                     "profile_id": profile_id,
                     "profile_name": profile.name,
-                    "error": "Authentication failed with the provided credentials",
-                    "message": f"Failed to authenticate profile '{profile.name}'. Please check the credentials."
+                    "message": f"Account information successfully refreshed for profile '{profile.name}'"
+                }
+            )
+
+            release_task_lock("refresh_account_info", profile_id)
+            return f"Account info refresh completed for profile {profile_id} ({profile.name})."
+
+        except M3UAccountProfile.DoesNotExist:
+            error_msg = f"Profile {profile_id} not found"
+            logger.error(error_msg)
+
+            send_websocket_update(
+                "updates",
+                "update",
+                {
+                    "type": "account_refresh_error",
+                    "profile_id": profile_id,
+                    "error": "Profile not found",
+                    "message": f"Profile {profile_id} not found"
                 }
             )
 
             release_task_lock("refresh_account_info", profile_id)
             return error_msg
+        except Exception as e:
+            error_msg = f"Error refreshing account info for profile {profile_id}: {str(e)}"
+            logger.error(error_msg)
 
-        # Get account information
-        account_info = client.get_account_info()
+            send_websocket_update(
+                "updates",
+                "update",
+                {
+                    "type": "account_refresh_error",
+                    "profile_id": profile_id,
+                    "error": str(e),
+                    "message": f"Failed to refresh account info: {str(e)}"
+                }
+            )
 
-        # Update only this specific profile with the new account info
-        if not profile.custom_properties:
-            profile.custom_properties = {}
-        profile.custom_properties.update(account_info)
-        profile.save()
-
-        # Send success notification to frontend via websocket
-        send_websocket_update(
-            "updates",
-            "update",
-            {
-                "type": "account_info_refresh_success",
-                "profile_id": profile_id,
-                "profile_name": profile.name,
-                "message": f"Account information successfully refreshed for profile '{profile.name}'"
-            }
-        )
-
-        release_task_lock("refresh_account_info", profile_id)
-        return f"Account info refresh completed for profile {profile_id} ({profile.name})."
-
-    except M3UAccountProfile.DoesNotExist:
-        error_msg = f"Profile {profile_id} not found"
-        logger.error(error_msg)
-
-        send_websocket_update(
-            "updates",
-            "update",
-            {
-                "type": "account_refresh_error",
-                "profile_id": profile_id,
-                "error": "Profile not found",
-                "message": f"Profile {profile_id} not found"
-            }
-        )
-
-        release_task_lock("refresh_account_info", profile_id)
-        return error_msg
-    except Exception as e:
-        error_msg = f"Error refreshing account info for profile {profile_id}: {str(e)}"
-        logger.error(error_msg)
-
-        send_websocket_update(
-            "updates",
-            "update",
-            {
-                "type": "account_refresh_error",
-                "profile_id": profile_id,
-                "error": str(e),
-                "message": f"Failed to refresh account info: {str(e)}"
-            }
-        )
-
-        release_task_lock("refresh_account_info", profile_id)
-        return error_msg
+            release_task_lock("refresh_account_info", profile_id)
+            return error_msg
+    finally:
+        connection.close()
 @shared_task(time_limit=3600, soft_time_limit=3500)
 def refresh_single_m3u_account(account_id):
     """Splits M3U processing into chunks and dispatches them as parallel tasks."""

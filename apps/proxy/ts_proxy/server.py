@@ -21,6 +21,7 @@ from apps.proxy.config import TSConfig as Config
 from apps.channels.models import Channel, Stream
 from core.utils import RedisClient, log_system_event
 from redis.exceptions import ConnectionError, TimeoutError
+from django.db import connection
 from .stream_manager import StreamManager
 from .stream_buffer import StreamBuffer
 from .client_manager import ClientManager
@@ -211,22 +212,31 @@ class ProxyServer:
                                     if event_type == EventType.CLIENT_CONNECTED:
                                         logger.debug(f"Owner received {EventType.CLIENT_CONNECTED} event for channel {channel_id}")
                                         # Reset any disconnect timer
-                                        disconnect_key = RedisKeys.last_client_disconnect(channel_id)
-                                        self.redis_client.delete(disconnect_key)
+                                        try:
+                                            disconnect_key = RedisKeys.last_client_disconnect(channel_id)
+                                            self.redis_client.delete(disconnect_key)
+                                        finally:
+                                            connection.close()
 
                                     elif event_type == EventType.CLIENT_DISCONNECTED:
                                         client_id = data.get("client_id")
                                         worker_id = data.get("worker_id")
                                         logger.debug(f"Owner received {EventType.CLIENT_DISCONNECTED} event for channel {channel_id}, client {client_id} from worker {worker_id}")
                                         # Delegate to dedicated method
-                                        self.handle_client_disconnect(channel_id)
-
+                                        try:
+                                            self.handle_client_disconnect(channel_id)
+                                        finally:
+                                            connection.close()
 
                                     elif event_type == EventType.STREAM_SWITCH:
                                         logger.info(f"Owner received {EventType.STREAM_SWITCH} request for channel {channel_id}")
                                         # Handle stream switch request
-                                        new_url = data.get("url")
-                                        user_agent = data.get("user_agent")
+                                        try:
+                                            new_url = data.get("url")
+                                            user_agent = data.get("user_agent")
+                                            self.switch_channel_stream(channel_id, new_url, user_agent)
+                                        finally:
+                                            connection.close()
 
                                         if new_url and channel_id in self.stream_managers:
                                             # Update metadata in Redis
@@ -1303,6 +1313,7 @@ class ProxyServer:
                     self._last_orphan_check = time.time()
 
                 gevent.sleep(ConfigHelper.cleanup_check_interval())
+                connection.close()
 
         thread = threading.Thread(target=cleanup_task, daemon=True)
         thread.name = "ts-proxy-cleanup"
