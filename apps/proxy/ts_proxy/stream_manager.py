@@ -7,8 +7,6 @@ import socket
 import requests
 import subprocess
 import gevent
-from gevent import monkey
-monkey.patch_all()  # Ensure all primitives and subprocesses are gevent-compatible
 import re
 from typing import Optional, List
 from django.db import connection

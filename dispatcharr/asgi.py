@@ -1,3 +1,4 @@
+from gevent import monkey; monkey.patch_all()  # Patch as early as possible
 import django
 import os
 from django.core.asgi import get_asgi_application

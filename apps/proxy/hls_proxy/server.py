@@ -7,9 +7,6 @@ This proxy handles HLS live streams with support for:
 - Connection pooling and reuse
 """
 
-from gevent import monkey
-monkey.patch_all()  # Ensure all primitives are gevent-compatible
-
 import requests
 import threading
 import logging

@@ -1,3 +1,4 @@
+from gevent import monkey; monkey.patch_all()  # Patch as early as possible
 """
 WSGI config for dispatcharr project.
 """

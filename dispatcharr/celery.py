@@ -1,4 +1,5 @@
 # dispatcharr/celery.py
+from gevent import monkey; monkey.patch_all()  # Patch as early as possible
 import os
 from celery import Celery
 import logging
