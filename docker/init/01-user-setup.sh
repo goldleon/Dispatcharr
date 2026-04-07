@@ -66,52 +66,61 @@ else
     fi
 fi
 
-# Get the GID of /dev/dri/renderD128 on the host (must be mounted into container)
-if [ -e "/dev/dri/renderD128" ]; then
-    HOST_RENDER_GID=$(stat -c '%g' /dev/dri/renderD128)
+# Detect available render nodes and ensure the render group matches host GID
+# This allows hardware acceleration to work with non-default GPU configurations (e.g. renderD129)
+FOUND_RENDER_DEVICE=false
+for device in /dev/dri/renderD*; do
+    if [ -e "$device" ]; then
+        HOST_RENDER_GID=$(stat -c '%g' "$device")
+        DEVICE_NAME=$(basename "$device")
+        echo "Found render device $DEVICE_NAME with host GID $HOST_RENDER_GID"
+        
+        # Check if this GID belongs to the video group
+        VIDEO_GID=$(getent group video 2>/dev/null | cut -d: -f3)
 
-    # Check if this GID belongs to the video group
-    VIDEO_GID=$(getent group video 2>/dev/null | cut -d: -f3)
-
-    if [ "$HOST_RENDER_GID" = "$VIDEO_GID" ]; then
-        echo "RenderD128 GID ($HOST_RENDER_GID) matches video group GID. Using video group for GPU access."
-        # Make sure POSTGRES_USER is in video group
-        if ! id -nG "$POSTGRES_USER" | grep -qw "video"; then
-            usermod -a -G video "$POSTGRES_USER"
-            echo "Added user $POSTGRES_USER to video group for GPU access"
-        fi
-    else
-        # We need to ensure render group exists with correct GID
-        if getent group render >/dev/null; then
-            CURRENT_RENDER_GID=$(getent group render | cut -d: -f3)
-            if [ "$CURRENT_RENDER_GID" != "$HOST_RENDER_GID" ]; then
-                # Check if another group already has the target GID
-                if getent group "$HOST_RENDER_GID" >/dev/null 2>&1; then
-                    EXISTING_GROUP=$(getent group "$HOST_RENDER_GID" | cut -d: -f1)
-                    echo "Warning: Cannot change render group GID to $HOST_RENDER_GID as it's already used by group '$EXISTING_GROUP'"
-                    # Add user to the existing group with the target GID to ensure device access
-                    if ! id -nG "$POSTGRES_USER" | grep -qw "$EXISTING_GROUP"; then
-                        usermod -a -G "$EXISTING_GROUP" "$POSTGRES_USER" || echo "Warning: Failed to add user to $EXISTING_GROUP group"
-                        echo "Added user $POSTGRES_USER to $EXISTING_GROUP group for GPU access"
-                    fi
-                else
-                    echo "Changing render group GID from $CURRENT_RENDER_GID to $HOST_RENDER_GID"
-                    groupmod -g "$HOST_RENDER_GID" render || echo "Warning: Failed to change render group GID. Continuing anyway..."
-                fi
+        if [ "$HOST_RENDER_GID" = "$VIDEO_GID" ]; then
+            echo "Device $DEVICE_NAME GID matches video group GID. Using video group for GPU access."
+            if ! id -nG "$POSTGRES_USER" | grep -qw "video"; then
+                usermod -a -G video "$POSTGRES_USER"
+                echo "Added user $POSTGRES_USER to video group for GPU access"
             fi
         else
-            echo "Creating render group with GID $HOST_RENDER_GID"
-            groupadd -g "$HOST_RENDER_GID" render
-        fi
+            # We need to ensure render group exists with correct GID
+            if getent group render >/dev/null; then
+                CURRENT_RENDER_GID=$(getent group render | cut -d: -f3)
+                if [ "$CURRENT_RENDER_GID" != "$HOST_RENDER_GID" ]; then
+                    # Check if another group already has the target GID
+                    if getent group "$HOST_RENDER_GID" >/dev/null 2>&1; then
+                        EXISTING_GROUP=$(getent group "$HOST_RENDER_GID" | cut -d: -f1)
+                        echo "Warning: Cannot change render group GID to $HOST_RENDER_GID as it's already used by group '$EXISTING_GROUP'"
+                        if ! id -nG "$POSTGRES_USER" | grep -qw "$EXISTING_GROUP"; then
+                            usermod -a -G "$EXISTING_GROUP" "$POSTGRES_USER" || echo "Warning: Failed to add user to $EXISTING_GROUP group"
+                            echo "Added user $POSTGRES_USER to $EXISTING_GROUP group for GPU access"
+                        fi
+                    else
+                        echo "Changing render group GID from $CURRENT_RENDER_GID to $HOST_RENDER_GID"
+                        groupmod -g "$HOST_RENDER_GID" render || echo "Warning: Failed to change render group GID"
+                    fi
+                fi
+            else
+                echo "Creating render group with GID $HOST_RENDER_GID"
+                groupadd -g "$HOST_RENDER_GID" render
+            fi
 
-        # Make sure POSTGRES_USER is in render group
-        if ! id -nG "$POSTGRES_USER" | grep -qw "render"; then
-            usermod -a -G render "$POSTGRES_USER"
-            echo "Added user $POSTGRES_USER to render group for GPU access"
+            # Always add user to render group if it exists/was created
+            if ! id -nG "$POSTGRES_USER" | grep -qw "render"; then
+                usermod -a -G render "$POSTGRES_USER"
+                echo "Added user $POSTGRES_USER to render group for GPU access"
+            fi
         fi
+        FOUND_RENDER_DEVICE=true
+        # Usually one group mapping is enough for all devices of the same type
+        # break
     fi
-else
-    echo "Warning: /dev/dri/renderD128 not found. GPU acceleration may not be available."
+done
+
+if [ "$FOUND_RENDER_DEVICE" = "false" ]; then
+    echo "Warning: No /dev/dri/renderD* devices found. GPU acceleration may not be available."
 fi
 
 # Always add user to video group for hardware acceleration if it exists

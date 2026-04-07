@@ -93,10 +93,14 @@ class PluginManager:
 
         try:
             configs: Optional[Dict[str, PluginConfig]] = None
-            try:
-                configs = {c.key: c for c in PluginConfig.objects.all()}
-            except Exception:
-                # DB might not be ready; treat all plugins as untrusted
+            if sync_db:
+                try:
+                    configs = {c.key: c for c in PluginConfig.objects.all()}
+                except Exception:
+                    # DB might not be ready; treat all plugins as untrusted
+                    configs = None
+            else:
+                # During initial discovery (ready()), don't hit the DB to avoid RuntimeWarning
                 configs = None
 
             new_registry: Dict[str, LoadedPlugin] = {}

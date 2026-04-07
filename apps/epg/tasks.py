@@ -570,34 +570,39 @@ def fetch_xmltv(source):
             return True
 
     except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP Error fetching XMLTV from {source.name}: {e}", exc_info=True)
-
-        # Get error details
-        status_code = e.response.status_code if hasattr(e, 'response') and e.response else 'unknown'
+        status_code = e.response.status_code if hasattr(e, 'response') and e.response is not None else 'unknown'
         error_message = str(e)
-
-        # Create a user-friendly message
         user_message = f"EPG source '{source.name}' encountered HTTP error {status_code}"
 
-        # Add specific handling for common HTTP errors
+        # Differentiate between system-level errors and provider-side restrictions
+        provider_issue = False
         if status_code == 404:
             user_message = f"EPG source '{source.name}' URL not found (404) - will retry on next scheduled run"
-        elif status_code == 401 or status_code == 403:
-            user_message = f"EPG source '{source.name}' access denied (HTTP {status_code}) - check credentials"
+        elif status_code in (401, 403):
+            user_message = f"Provider side issue: EPG source '{source.name}' access denied (HTTP {status_code}) - check credentials"
+            provider_issue = True
         elif status_code == 429:
-            user_message = f"EPG source '{source.name}' rate limited (429) - try again later"
+            user_message = f"Provider side issue: EPG source '{source.name}' rate limited (429) - try again later"
+            provider_issue = True
         elif status_code == 451:
-            user_message = f"EPG source '{source.name}' unavailable for legal reasons (451) - provider may restrict access in your region"
+            user_message = f"Provider side issue: EPG source '{source.name}' unavailable for legal reasons (451) - provider may restrict access in your region"
+            provider_issue = True
         elif status_code >= 500:
             user_message = f"EPG source '{source.name}' server error (HTTP {status_code}) - will retry later"
+
+        # Use WARNING for known provider issues to avoid false alarms in production logs
+        if provider_issue:
+            logger.warning(f"{user_message} (URL: {source.url})")
+        else:
+            logger.error(f"HTTP Error fetching XMLTV from {source.name}: {e}", exc_info=True)
 
         # Update source status to error with the error message
         try:
             source.status = 'error'
             source.last_message = user_message
             source.save(update_fields=['status', 'last_message'])
-        except Exception as e:
-            logger.warning(f"Could not save HTTP error status for source {source.id}: {e}")
+        except Exception as save_err:
+            logger.warning(f"Could not save HTTP error status for source {source.id}: {save_err}")
 
         # Notify users through the WebSocket about the EPG fetch failure
         channel_layer = get_channel_layer()
@@ -617,7 +622,6 @@ def fetch_xmltv(source):
             }
         )
 
-        # Ensure we update the download progress to 100 with error status
         send_epg_update(source.id, "downloading", 100, status="error", error=user_message)
         return False
     except requests.exceptions.ConnectionError as e:
