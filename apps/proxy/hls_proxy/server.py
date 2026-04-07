@@ -7,12 +7,17 @@ This proxy handles HLS live streams with support for:
 - Connection pooling and reuse
 """
 
+from gevent import monkey
+monkey.patch_all()  # Ensure all primitives are gevent-compatible
+
 import requests
 import threading
 import logging
 import m3u8
 import time
 import gevent
+from gevent.event import Event
+from gevent.lock import Semaphore
 from urllib.parse import urlparse, urljoin
 import argparse
 from typing import Optional, Dict, List, Set, Deque
@@ -21,10 +26,8 @@ import os
 from apps.proxy.config import HLSConfig as Config
 from core.utils import build_upstream_headers
 
-# Global state management
-manifest_buffer = None  # Stores current manifest content
-segment_buffers = {}   # Maps sequence numbers to segment data
-buffer_lock = threading.Lock()  # Synchronizes access to buffers
+# Global state management was moved to instance level to support multi-channel isolation.
+# manifest_buffer, segment_buffers, and buffer_lock are now handled within StreamBuffer/StreamManager.
 
 class StreamBuffer:
     """
@@ -42,7 +45,8 @@ class StreamBuffer:
     
     def __init__(self):
         self.buffer: Dict[int, bytes] = {}  # Maps sequence numbers to segment data
-        self.lock: threading.Lock = threading.Lock()
+        self.manifest_buffer = None        # Stores current manifest content
+        self.lock = Semaphore(1)
 
     def __getitem__(self, key: int) -> Optional[bytes]:
         """Get segment data by sequence number"""
@@ -80,7 +84,7 @@ class ClientManager:
     
     def __init__(self):
         self.last_activity = {}  # Maps client IPs to last activity timestamp
-        self.lock = threading.Lock()
+        self.lock = Semaphore(1)
         
     def record_activity(self, client_ip: str):
         """Record client activity timestamp"""
@@ -142,6 +146,7 @@ class StreamManager:
         self.user_agent = user_agent or Config.DEFAULT_USER_AGENT
         self.running = True
         self.switching_stream = False
+        self.buffer_lock = Semaphore(1)  # Instance-level lock for manager state
         
         # Sequence tracking
         self.next_sequence = 0
@@ -158,7 +163,7 @@ class StreamManager:
         # Threading
         self.fetcher = None
         self.fetch_thread = None
-        self.url_changed = threading.Event()
+        self.url_changed = Event()
         
         # Add manifest info
         self.target_duration = 10.0  # Default, will be updated from manifest
@@ -179,7 +184,7 @@ class StreamManager:
         logging.info(f"Initialized stream manager for channel {channel_id}")
 
         # Buffer state tracking
-        self.buffer_ready = threading.Event()
+        self.buffer_ready = Event()
         self.buffered_duration = 0.0
         self.initial_buffering = True
 
@@ -201,7 +206,7 @@ class StreamManager:
             - Signals fetch thread
         """
         if new_url != self.current_url:
-            with buffer_lock:
+            with self.buffer_lock:
                 self.switching_stream = True
                 self.current_url = new_url
                 
@@ -623,58 +628,44 @@ def get_segment_sequence(segment_uri: str) -> Optional[int]:
 # Update verify_segment with more thorough checks
 def verify_segment(data: bytes) -> dict:
     """
-    Verify MPEG-TS segment integrity and structure.
+    Validate MPEG-TS segment integrity using packet sampling.
     
-    Args:
-        data: Raw segment data bytes
-        
-    Returns:
-        dict containing:
-            valid (bool): True if segment passes all checks
-            packets (int): Number of valid packets found
-            size (int): Total segment size in bytes
-            error (str): Description if validation fails
-            
-    Checks:
-    - Minimum size requirements
-    - Packet size alignment
-    - Sync byte presence
+    Checks for:
+    - Minimum data size (at least one packet)
+    - Valid TS packet size (188 bytes)
+    - Sync byte (0x47) alignment for sampled packets
     - Transport error indicators
     """
-
-    # Check minimum size
-    if len(data) < 188:
-        return {'valid': False, 'error': 'Segment too short'}
-        
-    # Verify segment size is multiple of packet size
+    if not data or len(data) < 188:
+        return {'valid': False, 'error': 'Empty or truncated segment'}
+    
     if len(data) % 188 != 0:
-        return {'valid': False, 'error': 'Invalid segment size'}
+        return {'valid': False, 'error': 'Invalid segment size (not a multiple of 188)'}
     
-    valid_packets = 0
     total_packets = len(data) // 188
-    
-    # Scan all packets in segment
-    for i in range(0, len(data), 188):
-        packet = data[i:i+188]
-        
-        # Check packet completeness
-        if len(packet) != 188:
-            return {'valid': False, 'error': 'Incomplete packet'}
+    # Sample packets: first, last, and up to 5 middle packets
+    sample_indices = {0, total_packets - 1}
+    if total_packets > 10:
+        for i in range(1, 6):
+            sample_indices.add((total_packets * i) // 6)
             
+    for idx in sorted(sample_indices):
+        offset = idx * 188
+        packet = data[offset : offset + 188]
+        
         # Verify sync byte
         if packet[0] != 0x47:
-            return {'valid': False, 'error': f'Invalid sync byte at offset {i}'}
+            return {'valid': False, 'error': f'Invalid sync byte at packet {idx}' }
             
         # Check transport error indicator
         if packet[1] & 0x80:
-            return {'valid': False, 'error': 'Transport error indicator set'}
-            
-        valid_packets += 1
+            return {'valid': False, 'error': f'Transport error indicator set at packet {idx}' }
     
     return {
-        'valid': True,
-        'packets': valid_packets,
-        'size': len(data)
+        'valid': True, 
+        'packets': total_packets,
+        'size': len(data),
+        'sampled': len(sample_indices)
     }
 
 def fetch_stream(fetcher: StreamFetcher, stop_event: threading.Event, start_sequence: int = 0):
@@ -717,12 +708,11 @@ def fetch_stream(fetcher: StreamFetcher, stop_event: threading.Event, start_sequ
                 
                 if not manifest.segments:
                     continue
-                
-                with buffer_lock:
+                with fetcher.buffer.lock:
                     manifest_content = manifest_data.decode()
                     new_segments = {}
                     
-                    if fetcher.manager.switching_stream:  # Use fetcher.manager instead of stream_manager
+                    if fetcher.manager.switching_stream:
                         # Stream switch - only get latest segment
                         manifest_segments = [manifest.segments[-1]]
                         seq_start = fetcher.manager.next_sequence
@@ -759,28 +749,27 @@ def fetch_stream(fetcher: StreamFetcher, stop_event: threading.Event, start_sequ
                             fetcher.manager.segment_durations[next_seq] = duration
                             segments_mapped += 1
                     
-                    manifest_buffer = manifest_content
+                    fetcher.buffer.manifest_buffer = manifest_content
 
                 # Download segments
                 for sequence_id, segment_info in new_segments.items():
                     try:
                         segment_url = f"{fetcher.last_host}{segment_info['uri']}"
-                        logging.debug(f"Downloading {segment_info['uri']} as segment {sequence_id}.ts "
-                                   f"(source: {segment_info['source_id']}, duration: {segment_info['duration']:.3f}s)")
+                        logging.debug(f"Downloading {segment_info['uri']} as segment {sequence_id}.ts")
                         
                         segment_data, _ = fetcher.download(segment_url)
                         validation = verify_segment(segment_data)
                         
                         if validation.get('valid', False):
-                            with buffer_lock:
-                                segment_buffers[sequence_id] = segment_data
-                                logging.debug(f"Downloaded and verified segment {sequence_id} (packets: {validation['packets']})")
+                            with fetcher.buffer.lock:
+                                fetcher.buffer[sequence_id] = segment_data
+                                logging.debug(f"Segment {sequence_id} cached and verified")
                                 
                                 if fetcher.manager.switching_stream:
                                     fetcher.manager.switching_stream = False
-                                    stop_event.set()  # Force fetcher restart with new URL
+                                    stop_event.set()
                                     break
-                                elif not buffer_initialized and len(segment_buffers) >= Config.INITIAL_SEGMENTS:
+                                elif not buffer_initialized and len(fetcher.buffer.buffer) >= Config.INITIAL_SEGMENTS:
                                     buffer_initialized = True
                                     manifest_update_needed = True
                                     break
@@ -789,12 +778,11 @@ def fetch_stream(fetcher: StreamFetcher, stop_event: threading.Event, start_sequ
                         continue
 
             else:
-                # Short sleep to prevent CPU spinning
-                threading.Event().wait(0.1)
+                gevent.sleep(0.1)
 
         except Exception as e:
             logging.error(f"Manifest error: {e}")
-            threading.Event().wait(retry_delay)
+            gevent.sleep(retry_delay)
             retry_delay = min(retry_delay * 2, max_retry_delay)
             manifest_update_needed = True
 
@@ -989,7 +977,7 @@ class ProxyServer:
             segment_id = int(segment_name.split('.')[0])
             buffer = self.stream_buffers[channel_id]
             
-            with buffer_lock:
+            with buffer.lock:
                 if segment_id in buffer:
                     return buffer[segment_id], 200  # Return content and status code
                     

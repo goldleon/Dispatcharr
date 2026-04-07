@@ -7,6 +7,8 @@ import socket
 import requests
 import subprocess
 import gevent
+from gevent import monkey
+monkey.patch_all()  # Ensure all primitives and subprocesses are gevent-compatible
 import re
 from typing import Optional, List
 from django.db import connection
@@ -633,114 +635,83 @@ class StreamManager:
             logger.debug(f"Started stderr reader thread for channel {self.channel_id}")
 
     def _read_stderr(self):
-        """Read and log ffmpeg stderr output with real-time stats parsing"""
+        """Read and log ffmpeg stderr output with optimized chunked reading"""
         try:
             buffer = b""
-            last_stats_line = b""
-
-            # Read byte by byte for immediate detection
+            # Use 4KB chunks for optimal throughput/latency trade-off
+            chunk_size = 4096
+            
             while self.transcode_process and self.transcode_process.stderr:
                 try:
-                    # Read one byte at a time for immediate processing
-                    byte = self.transcode_process.stderr.read(1)
-                    if not byte:
+                    # Read in chunks instead of byte-by-byte
+                    chunk = self.transcode_process.stderr.read(chunk_size)
+                    if not chunk:
                         break
-
-                    buffer += byte
-
-                    # Check for frame= at the start of buffer (new stats line)
-                    if buffer == b"frame=":
-                        # We detected the start of a stats line, read until we get a complete line
-                        # or hit a carriage return (which overwrites the previous stats)
-                        while True:
-                            next_byte = self.transcode_process.stderr.read(1)
-                            if not next_byte:
-                                break
-
-                            buffer += next_byte
-
-                            # Break on carriage return (stats overwrite) or newline
-                            if next_byte in (b'\r', b'\n'):
-                                break
-
-                            # Also break if we have enough data for a typical stats line
-                            if len(buffer) > 200:  # Typical stats line length
-                                break
-
-                        # Process the stats line immediately
-                        if buffer.strip():
-                            try:
-                                stats_text = buffer.decode('utf-8', errors='ignore').strip()
-                                if stats_text and "frame=" in stats_text:
-                                    self._parse_ffmpeg_stats(stats_text)
-                                    self._log_stderr_content(stats_text)
-                            except Exception as e:
-                                logger.debug(f"Error parsing immediate stats line: {e}")
-
-                        # Clear buffer after processing
-                        buffer = b""
-                        continue
-
-                    # Handle regular line breaks for non-stats content
-                    elif byte == b'\n':
-                        if buffer.strip():
-                            line_text = buffer.decode('utf-8', errors='ignore').strip()
-                            if line_text and not line_text.startswith("frame="):
-                                self._log_stderr_content(line_text)
-                        buffer = b""
-
-                    # Handle carriage returns (potential stats overwrite)
-                    elif byte == b'\r':
-                        # Check if this might be a stats line
-                        if b"frame=" in buffer:
-                            try:
-                                stats_text = buffer.decode('utf-8', errors='ignore').strip()
-                                if stats_text and "frame=" in stats_text:
-                                    self._parse_ffmpeg_stats(stats_text)
-                                    self._log_stderr_content(stats_text)
-                            except Exception as e:
-                                logger.debug(f"Error parsing stats on carriage return: {e}")
-                        elif buffer.strip():
-                            # Regular content with carriage return
-                            line_text = buffer.decode('utf-8', errors='ignore').strip()
-                            if line_text:
-                                self._log_stderr_content(line_text)
-                        buffer = b""
-
-                    # Prevent buffer from growing too large for non-stats content
-                    elif len(buffer) > 1024 and b"frame=" not in buffer:
-                        # Process whatever we have if it's not a stats line
-                        if buffer.strip():
-                            line_text = buffer.decode('utf-8', errors='ignore').strip()
-                            if line_text:
-                                self._log_stderr_content(line_text)
-                        buffer = b""
-
-                except ValueError:
-                    # stderr pipe was closed (FFmpeg exited) — expected on process exit
-                    logger.debug(f"stderr pipe closed for channel {self.channel_id} (process exited)")
+                        
+                    buffer += chunk
+                    
+                    # FFmpeg uses \r to overwrite stats lines and \n for regular logs
+                    # We split on both to handle real-time stats and regular lines
+                    while b'\n' in buffer or b'\r' in buffer:
+                        # Find the first occurrence of either line terminator
+                        idx_n = buffer.find(b'\n')
+                        idx_r = buffer.find(b'\r')
+                        
+                        if idx_n == -1: idx = idx_r
+                        elif idx_r == -1: idx = idx_n
+                        else: idx = min(idx_n, idx_r)
+                        
+                        line = buffer[:idx].strip()
+                        buffer = buffer[idx + 1:]
+                        
+                        if not line:
+                            continue
+                            
+                        try:
+                            line_text = line.decode('utf-8', errors='ignore').strip()
+                            if not line_text:
+                                continue
+                                
+                            # If it's a stats line, parse it
+                            if "frame=" in line_text:
+                                self._parse_ffmpeg_stats(line_text)
+                            
+                            # Log the line (with appropriate level filtering)
+                            self._log_stderr_content(line_text)
+                        except Exception as e:
+                            logger.debug(f"Error processing stderr line: {e}")
+                            
+                    # Prevent buffer runaway for non-terminated output
+                    if len(buffer) > 8192:
+                        buffer = buffer[-4096:]
+                        
+                    # Yield control to other greenlets
+                    gevent.sleep(0.01)
+                    
+                except (ValueError, OSError):
+                    # Pipe closed or process exited
                     break
                 except Exception as e:
-                    logger.debug(f"Error reading stderr byte for channel {self.channel_id}: {e}")
+                    logger.debug(f"Error in stderr read loop: {e}")
                     break
-
-            # Process any remaining buffer content
+                    
+        finally:
+            # CRITICAL: Always close DB connection in background threads to avoid leaks
+            try:
+                connection.close()
+                logger.debug(f"Closed DB connection for stderr reader thread (channel {self.channel_id})")
+            except Exception:
+                pass
+            
+            # Final buffer processing if anything remains
             if buffer.strip():
                 try:
-                    remaining_text = buffer.decode('utf-8', errors='ignore').strip()
-                    if remaining_text:
-                        if "frame=" in remaining_text:
-                            self._parse_ffmpeg_stats(remaining_text)
-                        self._log_stderr_content(remaining_text)
-                except Exception as e:
-                    logger.debug(f"Error processing remaining buffer: {e}")
-
-        except Exception as e:
-            # Catch any other exceptions in the thread to prevent crashes
-            try:
-                logger.error(f"Error in stderr reader thread for channel {self.channel_id}: {e}")
-            except:
-                pass
+                    final_text = buffer.decode('utf-8', errors='ignore').strip()
+                    if "frame=" in final_text:
+                        self._parse_ffmpeg_stats(final_text)
+                    self._log_stderr_content(final_text)
+                except Exception:
+                    pass
 
     def _log_stderr_content(self, content):
         """Log stderr content from FFmpeg with appropriate log levels"""
@@ -1232,55 +1203,63 @@ class StreamManager:
 
         while self.running:
             try:
-                now = time.time()
-                inactivity_duration = now - self.last_data_time
-                timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
+                try:
+                    now = time.time()
+                    inactivity_duration = now - self.last_data_time
+                    timeout_threshold = getattr(Config, 'CONNECTION_TIMEOUT', 10)
 
-                if inactivity_duration > timeout_threshold and self.connected:
+                    if inactivity_duration > timeout_threshold and self.connected:
+                        if self.healthy:
+                            logger.warning(f"Stream unhealthy for channel {self.channel_id} - no data for {inactivity_duration:.1f}s")
+                            self.healthy = False
+
+                        consecutive_unhealthy_checks += 1
+
+                        # Only set flags if enough time has passed since last action
+                        if (consecutive_unhealthy_checks >= max_unhealthy_checks and
+                            now - self.last_health_action_time > action_cooldown):
+
+                            # Calculate stability to decide on action type
+                            connection_start_time = getattr(self, 'connection_start_time', 0)
+                            stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
+
+                            if stable_time >= 30:  # Stream was stable, try reconnect first
+                                if not self.needs_reconnect:
+                                    logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
+                                    self.needs_reconnect = True
+                                    self.last_health_action_time = now
+                            else:
+                                # Stream wasn't stable, suggest stream switch
+                                if not self.needs_stream_switch:
+                                    logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
+                                    self.needs_stream_switch = True
+                                    self.last_health_action_time = now
+
+                            consecutive_unhealthy_checks = 0 # Reset after setting flag
+
+                    elif self.connected and not self.healthy:
+                        # Auto-recover health when data resumes
+                        logger.info(f"Stream health restored for channel {self.channel_id} - data resumed after {inactivity_duration:.1f}s")
+                        self.healthy = True
+                        consecutive_unhealthy_checks = 0
+                        # Clear recovery flags when healthy again
+                        self.needs_reconnect = False
+                        self.needs_stream_switch = False
+
                     if self.healthy:
-                        logger.warning(f"Stream unhealthy for channel {self.channel_id} - no data for {inactivity_duration:.1f}s")
-                        self.healthy = False
+                        consecutive_unhealthy_checks = 0
 
-                    consecutive_unhealthy_checks += 1
+                except Exception as e:
+                    logger.error(f"Error in health monitor: {e}")
 
-                    # Only set flags if enough time has passed since last action
-                    if (consecutive_unhealthy_checks >= max_unhealthy_checks and
-                        now - self.last_health_action_time > action_cooldown):
-
-                        # Calculate stability to decide on action type
-                        connection_start_time = getattr(self, 'connection_start_time', 0)
-                        stable_time = self.last_data_time - connection_start_time if connection_start_time > 0 else 0
-
-                        if stable_time >= 30:  # Stream was stable, try reconnect first
-                            if not self.needs_reconnect:
-                                logger.info(f"Setting reconnect flag for stable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_reconnect = True
-                                self.last_health_action_time = now
-                        else:
-                            # Stream wasn't stable, suggest stream switch
-                            if not self.needs_stream_switch:
-                                logger.info(f"Setting stream switch flag for unstable stream (stable for {stable_time:.1f}s) for channel {self.channel_id}")
-                                self.needs_stream_switch = True
-                                self.last_health_action_time = now
-
-                        consecutive_unhealthy_checks = 0 # Reset after setting flag
-
-                elif self.connected and not self.healthy:
-                    # Auto-recover health when data resumes
-                    logger.info(f"Stream health restored for channel {self.channel_id} - data resumed after {inactivity_duration:.1f}s")
-                    self.healthy = True
-                    consecutive_unhealthy_checks = 0
-                    # Clear recovery flags when healthy again
-                    self.needs_reconnect = False
-                    self.needs_stream_switch = False
-
-                if self.healthy:
-                    consecutive_unhealthy_checks = 0
-
-            except Exception as e:
-                logger.error(f"Error in health monitor: {e}")
-
-            gevent.sleep(self.health_check_interval)
+                gevent.sleep(self.health_check_interval)
+            finally:
+                # CRITICAL: Always close DB connection in background threads to avoid leaks
+                try:
+                    connection.close()
+                    logger.debug(f"Closed DB connection for health monitor thread (channel {self.channel_id})")
+                except Exception:
+                    pass
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to the current stream"""
