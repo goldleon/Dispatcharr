@@ -16,6 +16,35 @@ import re
 logger = logging.getLogger(__name__)
 
 
+def clean_metadata_id(value):
+    """
+    Clean and validate TMDB/IMDb IDs from providers.
+    - Strips whitespace.
+    - returns None for URLs.
+    - returns None for '0', empty strings or 'null'.
+    - returns None for strings > 255 chars.
+    """
+    if value is None:
+        return None
+
+    # Convert to string and strip
+    val_str = str(value).strip()
+
+    # Check for empty, '0', or 'null'
+    if not val_str or val_str == '0' or val_str.lower() == 'null':
+        return None
+
+    # Check for URLs (common provider error)
+    if val_str.startswith(('http://', 'https://')):
+        return None
+
+    # Check for excessive length (DB constraint is 255)
+    if len(val_str) > 255:
+        return None
+
+    return val_str
+
+
 @shared_task
 def refresh_vod_content(account_id):
     """Refresh VOD content for an M3U account with batch processing for improved performance"""
@@ -409,14 +438,8 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
 
             # Extract metadata
             year = extract_year_from_data(movie_data, 'name')
-            tmdb_id = movie_data.get('tmdb_id') or movie_data.get('tmdb')
-            imdb_id = movie_data.get('imdb_id') or movie_data.get('imdb')
-
-            # Clean empty string IDs and zero values (some providers use 0 to indicate no ID)
-            if tmdb_id == '' or tmdb_id == 0 or tmdb_id == '0':
-                tmdb_id = None
-            if imdb_id == '' or imdb_id == 0 or imdb_id == '0':
-                imdb_id = None
+            tmdb_id = clean_metadata_id(movie_data.get('tmdb_id') or movie_data.get('tmdb'))
+            imdb_id = clean_metadata_id(movie_data.get('imdb_id') or movie_data.get('imdb'))
 
             # Create a unique key for this movie (priority: TMDB > IMDB > name+year)
             if tmdb_id:
@@ -749,14 +772,8 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
             if not year and series_data.get('release_date'):
                 year = extract_year(series_data.get('release_date'))
 
-            tmdb_id = series_data.get('tmdb') or series_data.get('tmdb_id')
-            imdb_id = series_data.get('imdb') or series_data.get('imdb_id')
-
-            # Clean empty string IDs and zero values (some providers use 0 to indicate no ID)
-            if tmdb_id == '' or tmdb_id == 0 or tmdb_id == '0':
-                tmdb_id = None
-            if imdb_id == '' or imdb_id == 0 or imdb_id == '0':
-                imdb_id = None
+            tmdb_id = clean_metadata_id(series_data.get('tmdb') or series_data.get('tmdb_id'))
+            imdb_id = clean_metadata_id(series_data.get('imdb') or series_data.get('imdb_id'))
 
             # Create a unique key for this series (priority: TMDB > IMDB > name+year)
             if tmdb_id:
@@ -2130,8 +2147,8 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
                     except Exception:
                         pass
                 # Handle TMDB/IMDB ID updates with duplicate key protection
-                tmdb_id_to_set = info.get('tmdb_id') if info.get('tmdb_id') and info.get('tmdb_id') != movie.tmdb_id else None
-                imdb_id_to_set = info.get('imdb_id') if info.get('imdb_id') and info.get('imdb_id') != movie.imdb_id else None
+                tmdb_id_to_set = clean_metadata_id(info.get('tmdb_id')) if info.get('tmdb_id') and info.get('tmdb_id') != movie.tmdb_id else None
+                imdb_id_to_set = clean_metadata_id(info.get('imdb_id')) if info.get('imdb_id') and info.get('imdb_id') != movie.imdb_id else None
 
                 logger.debug(f"Movie {movie.id} current IDs: tmdb_id={movie.tmdb_id}, imdb_id={movie.imdb_id}")
                 logger.debug(f"IDs to set: tmdb_id={tmdb_id_to_set}, imdb_id={imdb_id_to_set}")

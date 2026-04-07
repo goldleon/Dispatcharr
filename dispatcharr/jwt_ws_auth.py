@@ -12,13 +12,17 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 @database_sync_to_async
-def get_user(validated_token):
+def get_user_from_token(token):
     try:
         jwt_auth = JWTAuthentication()
+        validated_token = jwt_auth.get_validated_token(token)
         user = jwt_auth.get_user(validated_token)
-        return user
+        return user or AnonymousUser()
+    except (InvalidToken, TokenError) as e:
+        logger.warning(f"Invalid token in WebSocket: {str(e)}")
+        return AnonymousUser()
     except User.DoesNotExist:
-        logger.warning(f"User from token does not exist. User ID: {validated_token.get('user_id', 'unknown')}")
+        logger.warning(f"User from token does not exist.")
         return AnonymousUser()
     except Exception as e:
         logger.error(f"Error getting user from token: {str(e)}")
@@ -32,12 +36,7 @@ class JWTAuthMiddleware(BaseMiddleware):
             token = query_string.get("token", [None])[0]
 
             if token is not None:
-                try:
-                    validated_token = JWTAuthentication().get_validated_token(token)
-                    scope["user"] = await get_user(validated_token)
-                except (InvalidToken, TokenError) as e:
-                    logger.warning(f"Invalid token: {str(e)}")
-                    scope["user"] = AnonymousUser()
+                scope["user"] = await get_user_from_token(token)
             else:
                 scope["user"] = AnonymousUser()
         except Exception as e:

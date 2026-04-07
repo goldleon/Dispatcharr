@@ -84,8 +84,8 @@ class Series(models.Model):
     logo = models.ForeignKey(VODLogo, on_delete=models.SET_NULL, null=True, blank=True, related_name='series')
 
     # Metadata IDs for deduplication - these should be globally unique when present
-    tmdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="TMDB ID for metadata")
-    imdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="IMDB ID for metadata")
+    tmdb_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="TMDB ID for metadata")
+    imdb_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="IMDB ID for metadata")
 
     # Additional metadata and properties
     custom_properties = models.JSONField(blank=True, null=True, help_text='Additional metadata and properties for the series')
@@ -123,8 +123,8 @@ class Movie(models.Model):
     logo = models.ForeignKey(VODLogo, on_delete=models.SET_NULL, null=True, blank=True, related_name='movie')
 
     # Metadata IDs for deduplication - these should be globally unique when present
-    tmdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="TMDB ID for metadata")
-    imdb_id = models.CharField(max_length=50, blank=True, null=True, unique=True, help_text="IMDB ID for metadata")
+    tmdb_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="TMDB ID for metadata")
+    imdb_id = models.CharField(max_length=255, blank=True, null=True, unique=True, help_text="IMDB ID for metadata")
 
     # Additional metadata and properties
     custom_properties = models.JSONField(blank=True, null=True, help_text='Additional metadata and properties for the movie')
@@ -165,8 +165,8 @@ class Episode(models.Model):
     episode_number = models.IntegerField(blank=True, null=True)
 
     # Metadata IDs
-    tmdb_id = models.CharField(max_length=50, blank=True, null=True, help_text="TMDB ID for metadata", db_index=True)
-    imdb_id = models.CharField(max_length=50, blank=True, null=True, help_text="IMDB ID for metadata", db_index=True)
+    tmdb_id = models.CharField(max_length=255, blank=True, null=True, help_text="TMDB ID for metadata", db_index=True)
+    imdb_id = models.CharField(max_length=255, blank=True, null=True, help_text="IMDB ID for metadata", db_index=True)
 
     # Custom properties for episode
     custom_properties = models.JSONField(blank=True, null=True, help_text="Custom properties for this episode")
