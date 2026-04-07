@@ -26,6 +26,23 @@ from .url_utils import get_alternate_streams, get_stream_info_for_switch, get_st
 
 logger = get_logger()
 
+# H2: Module-level cache for the locked FFmpeg StreamProfile.
+# This profile is created once and never changes, so querying DB every
+# transcode attempt is wasteful. Cache it for the lifetime of the process.
+_FFMPEG_PROFILE_CACHE = None
+
+def _get_ffmpeg_profile():
+    """Return the locked FFmpeg StreamProfile, cached after first lookup."""
+    global _FFMPEG_PROFILE_CACHE
+    if _FFMPEG_PROFILE_CACHE is None:
+        from core.models import StreamProfile
+        try:
+            _FFMPEG_PROFILE_CACHE = StreamProfile.objects.get(name='ffmpeg', locked=True)
+            logger.debug("Cached locked FFmpeg StreamProfile")
+        except StreamProfile.DoesNotExist:
+            logger.warning("Locked FFmpeg StreamProfile not found in DB")
+    return _FFMPEG_PROFILE_CACHE
+
 
 class StreamManager:
     """Manages a connection to a TS stream without using raw sockets"""
@@ -65,13 +82,16 @@ class StreamManager:
         self.health_check_interval = ConfigHelper.get('HEALTH_CHECK_INTERVAL', 5)
         self.chunk_size = ConfigHelper.chunk_size()
 
-        # Add to your __init__ method
-        self._buffer_check_timers = []
+        # C4: Use a single greenlet instead of cascading threading.Timers
+        self._buffer_check_greenlet = None
         self.stopping = False
 
         # Add tracking for tried streams and current stream
         self.current_stream_id = stream_id
         self.tried_stream_ids = set()
+        # M7: Track when streams were last exhausted so we can reset after cool-down
+        self._tried_ids_exhausted_at = None
+        self._tried_ids_cooldown = 3600  # 1 hour — reset tried set after all streams fail
 
         # IMPROVED LOGGING: Better handle and track stream ID
         if stream_id:
@@ -298,7 +318,7 @@ class StreamManager:
                 url_failed = False
                 if self.url_switching:
                     logger.debug(f"Skipping connection attempt during URL switch for channel {self.channel_id}")
-                    gevent.sleep(0.1)  # REPLACE time.sleep(0.1)
+                    gevent.sleep(0.1)
                     continue
                 # Connection retry loop for current URL
                 while self.running and self.retry_count < self.max_retries and not url_failed and not self.needs_stream_switch:
@@ -375,7 +395,7 @@ class StreamManager:
                             # Wait with exponential backoff before retrying
                             timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
                             logger.info(f"Reconnecting in {timeout} seconds... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            gevent.sleep(timeout)  # REPLACE time.sleep(timeout)
+                            gevent.sleep(timeout)
 
                     except Exception as e:
                         logger.error(f"Connection error on channel: {self.channel_id}: {e}", exc_info=True)
@@ -401,7 +421,7 @@ class StreamManager:
                             # Wait with exponential backoff before retrying
                             timeout = min(.25 * self.retry_count, 3)  # Cap at 3 seconds
                             logger.info(f"Reconnecting in {timeout} seconds after error... (attempt {self.retry_count}/{self.max_retries}) for channel: {self.channel_id}")
-                            gevent.sleep(timeout)  # REPLACE time.sleep(timeout)
+                            gevent.sleep(timeout)
 
                 # If URL failed and we're still running, try switching to another stream
                 if url_failed and self.running:
@@ -535,16 +555,15 @@ class StreamManager:
 
             channel = get_stream_object(self.channel_id)
 
-            # Use FFmpeg specifically for HLS streams
+            # H2: Use cached FFmpeg profile instead of DB query on every attempt
             if hasattr(self, 'force_ffmpeg') and self.force_ffmpeg:
-                from core.models import StreamProfile
-                try:
-                    stream_profile = StreamProfile.objects.get(name='ffmpeg', locked=True)
-                    logger.info("Using FFmpeg stream profile for unsupported proxy content (HLS/RTSP/UDP)")
-                except StreamProfile.DoesNotExist:
+                stream_profile = _get_ffmpeg_profile()
+                if stream_profile is None:
                     # Fall back to channel's profile if FFmpeg not found
                     stream_profile = channel.get_stream_profile()
                     logger.warning(f"FFmpeg profile not found, using channel default profile for channel: {self.channel_id}")
+                else:
+                    logger.info("Using FFmpeg stream profile for unsupported proxy content (HLS/RTSP/UDP)")
             else:
                 stream_profile = channel.get_stream_profile()
 
@@ -1074,15 +1093,9 @@ class StreamManager:
                 owner_key = RedisKeys.channel_owner(self.channel_id)
                 current_owner = self.buffer.redis_client.get(owner_key)
 
-        # Cancel all buffer check timers
-        for timer in list(self._buffer_check_timers):
-            try:
-                if timer and timer.is_alive():
-                    timer.cancel()
-            except Exception as e:
-                logger.error(f"Error canceling buffer check timer for channel {self.channel_id}: {e}")
-
-        self._buffer_check_timers.clear()
+        # C4: Cancel buffer check greenlet instead of timer list
+        if self._buffer_check_greenlet and not self._buffer_check_greenlet.dead:
+            self._buffer_check_greenlet.kill(block=False)
 
         # Set the flag first
         self.stop_requested = True
@@ -1123,6 +1136,7 @@ class StreamManager:
         if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
             try:
                 # Use the new method to update the profile and manage connection counts
+                success = False  # M3: initialize before conditional assignment
                 if m3u_profile_id:
                     # Execute async via celery or direct filter instead of using the channel instance methods
                     # Since update_stream_profile evaluates complex rules, we must fetch the channel
@@ -1266,7 +1280,7 @@ class StreamManager:
             except Exception as e:
                 logger.error(f"Error in health monitor: {e}")
 
-            gevent.sleep(self.health_check_interval)  # REPLACE time.sleep(self.health_check_interval)
+            gevent.sleep(self.health_check_interval)
 
     def _attempt_reconnect(self):
         """Attempt to reconnect to the current stream"""
@@ -1579,10 +1593,9 @@ class StreamManager:
                                 redis_client.hset(metadata_key, mapping=update_data)
                                 logger.info(f"Channel {channel_id} connected but waiting for buffer to fill: {current_buffer_index}/{initial_chunks_needed} chunks")
 
-                            # Schedule a retry to check buffer status again
-                            timer = threading.Timer(0.5, self._check_buffer_and_set_state)
-                            timer.daemon = True
-                            timer.start()
+                            # C4: Spawn a single persistent greenlet instead of chained timers
+                            if self._buffer_check_greenlet is None or self._buffer_check_greenlet.dead:
+                                self._buffer_check_greenlet = gevent.spawn(self._buffer_check_loop)
                             return False
 
                         # We have enough buffer, proceed with state change
@@ -1603,22 +1616,16 @@ class StreamManager:
         except Exception as e:
             logger.error(f"Error setting waiting for clients state for channel {channel_id}: {e}")
 
-    def _check_buffer_and_set_state(self):
-        """Check buffer size and set state to waiting_for_clients when ready"""
-        try:
-            # Enhanced stop detection with short-circuit return
-            if not self.running or getattr(self, 'stopping', False) or getattr(self, 'reconnecting', False):
-                logger.debug(f"Buffer check aborted - channel {self.buffer.channel_id} is stopping or reconnecting")
-                return False  # Return value to indicate check was aborted
+    def _buffer_check_loop(self):
+        """C4: Persistent greenlet that polls the Redis buffer index until ready."""
+        while self.running and not getattr(self, 'stopping', False) and not getattr(self, 'reconnecting', False):
+            try:
+                if not hasattr(self.buffer, 'channel_id') or not hasattr(self.buffer, 'redis_client'):
+                    break
 
-            # Clean up completed timers
-            self._buffer_check_timers = [t for t in self._buffer_check_timers if t.is_alive()]
-
-            if hasattr(self.buffer, 'channel_id') and hasattr(self.buffer, 'redis_client'):
                 channel_id = self.buffer.channel_id
                 redis_client = self.buffer.redis_client
 
-                # IMPORTANT: Read from Redis, not local buffer.index
                 buffer_index_key = RedisKeys.buffer_index(channel_id)
                 current_buffer_index = 0
                 try:
@@ -1628,27 +1635,26 @@ class StreamManager:
                 except Exception as e:
                     logger.error(f"Error reading buffer index from Redis: {e}")
 
-                initial_chunks_needed = ConfigHelper.initial_behind_chunks()  # Use ConfigHelper for consistency
+                initial_chunks_needed = ConfigHelper.initial_behind_chunks()
 
                 if current_buffer_index >= initial_chunks_needed:
-                    # We now have enough buffer, call _set_waiting_for_clients again
                     logger.info(f"Buffer threshold reached for channel {channel_id}: {current_buffer_index}/{initial_chunks_needed} chunks")
                     self._set_waiting_for_clients()
+                    break  # Done — exit the loop
                 else:
-                    # Still waiting, log progress and schedule another check
                     logger.debug(f"Buffer filling for channel {channel_id}: {current_buffer_index}/{initial_chunks_needed} chunks")
 
-                    # Schedule another check - NOW WITH STOPPING CHECK
-                    if self.running and not getattr(self, 'stopping', False):
-                        timer = threading.Timer(0.5, self._check_buffer_and_set_state)
-                        timer.daemon = True
-                        timer.start()
-                        self._buffer_check_timers.append(timer)
+            except Exception as e:
+                logger.error(f"Error in buffer check loop for channel {self.channel_id}: {e}")
+                break
 
-            return True  # Return value to indicate check was successful
-        except Exception as e:
-            logger.error(f"Error in buffer check for channel {self.channel_id}: {e}")
-            return False
+            gevent.sleep(0.5)
+
+    def _check_buffer_and_set_state(self):
+        """Legacy wrapper — kept for compatibility; delegates to _buffer_check_loop."""
+        if self._buffer_check_greenlet is None or self._buffer_check_greenlet.dead:
+            self._buffer_check_greenlet = gevent.spawn(self._buffer_check_loop)
+        return True
 
     def _try_next_stream(self):
         """
@@ -1677,6 +1683,21 @@ class StreamManager:
                 # Check if we have streams but they've all been tried
                 if alternate_streams and len(self.tried_stream_ids) > 0:
                     logger.warning(f"All {len(alternate_streams)} alternate streams have been tried for channel {self.channel_id}")
+
+                    # M7: Reset after cool-down to allow retrying transient failures
+                    if self._tried_ids_exhausted_at is None:
+                        self._tried_ids_exhausted_at = time.time()
+                        logger.info(f"Marked stream exhaustion time for channel {self.channel_id}")
+                    elif time.time() - self._tried_ids_exhausted_at > self._tried_ids_cooldown:
+                        logger.info(
+                            f"Resetting tried_stream_ids for channel {self.channel_id} after "
+                            f"{self._tried_ids_cooldown}s cool-down — will retry all streams"
+                        )
+                        self.tried_stream_ids = {self.current_stream_id} if self.current_stream_id else set()
+                        self._tried_ids_exhausted_at = None
+                        # Recurse once with a clean set
+                        return self._try_next_stream()
+
                 return False
 
             # IMPROVED: Try multiple streams until we find one with a different URL

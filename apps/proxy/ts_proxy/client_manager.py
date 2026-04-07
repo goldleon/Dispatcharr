@@ -41,31 +41,39 @@ class ClientManager:
         # Start heartbeat thread for local clients
         self._start_heartbeat_thread()
         self._registered_clients = set()  # Track already registered client IDs
+        self._last_stats_update = 0.0   # M2: rate-limit stats broadcast
 
     def _trigger_stats_update(self):
-        """Trigger a channel stats update via WebSocket in a background thread.
+        """Trigger a channel stats update via WebSocket at most once per 2 seconds.
 
-        Offloaded so the caller is not blocked. send_websocket_update is
-        gevent-safe (offloads async_to_sync to a native OS thread).
+        H3: Reuses shared Redis connection instead of creating a new one per call.
+        M2: Rate-limited to prevent broadcast storms under rapid client churn.
         """
+        now = time.time()
+        if now - self._last_stats_update < 2.0:  # M2: debounce
+            return
+        self._last_stats_update = now
         threading.Thread(target=self._do_stats_update, daemon=True).start()
 
     def _do_stats_update(self):
         """Perform the stats update in the background."""
         try:
             from apps.proxy.ts_proxy.channel_status import ChannelStatus
-            import redis
-            from django.conf import settings
+            from core.utils import RedisClient  # H3: reuse shared pool
 
-            redis_url = getattr(settings, 'REDIS_URL', 'redis://localhost:6379/0')
-            redis_client = redis.Redis.from_url(redis_url, decode_responses=True)
+            redis_client = RedisClient.get_client()
+            if redis_client is None:
+                return
+
             all_channels = []
             cursor = 0
 
             while True:
                 cursor, keys = redis_client.scan(cursor, match="ts_proxy:channel:*:clients", count=100)
                 for key in keys:
-                    parts = key.split(':')
+                    # key may be bytes if decode_responses is not set
+                    key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                    parts = key_str.split(':')
                     if len(parts) >= 4:
                         ch_id = parts[2]
                         channel_info = ChannelStatus.get_basic_channel_info(ch_id)
@@ -94,12 +102,11 @@ class ClientManager:
 
             while self._heartbeat_running:
                 try:
-                    # Wait for the interval, but check stop flag frequently for quick shutdown
                     # Sleep in 1-second increments to allow faster response to stop signal
                     for _ in range(int(self.heartbeat_interval)):
                         if not self._heartbeat_running:
                             break
-                        time.sleep(1)
+                        gevent.sleep(1)  # Non-blocking: yields control to the gevent event loop
 
                     # Final check before doing work
                     if not self._heartbeat_running:

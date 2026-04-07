@@ -12,6 +12,7 @@ import threading
 import logging
 import m3u8
 import time
+import gevent
 from urllib.parse import urlparse, urljoin
 import argparse
 from typing import Optional, Dict, List, Set, Deque
@@ -67,10 +68,12 @@ class StreamBuffer:
         return list(self.buffer.keys())
 
     def cleanup(self, keep_sequences: List[int]):
-        """Remove segments not in keep list"""
+        """Remove segments not in keep list."""
+        keep_set = set(keep_sequences)  # H7: O(1) lookup vs O(n) list scan
         for seq in list(self.buffer.keys()):
-            if seq not in keep_sequences:
+            if seq not in keep_set:
                 del self.buffer[seq]
+
 
 class ClientManager:
     """Manages client connections and activity tracking"""
@@ -171,7 +174,6 @@ class StreamManager:
         # Add client manager reference
         self.client_manager = None
         self.proxy_server = None  # Reference to proxy server for cleanup
-        self.cleanup_thread = None
         self.cleanup_interval = Config.CLIENT_CLEANUP_INTERVAL
         
         logging.info(f"Initialized stream manager for channel {channel_id}")
@@ -269,7 +271,7 @@ class StreamManager:
                 fetch_stream(fetcher, self.url_changed, self.next_sequence)
             except Exception as e:
                 logging.error(f"Stream error: {e}")
-                time.sleep(5)  # Wait before retry
+                gevent.sleep(5)  # Non-blocking retry wait
             
             self.url_changed.clear()
 
@@ -308,7 +310,7 @@ class StreamManager:
             while self.cleanup_running and (time.time() - start_time) < Config.INITIAL_CONNECTION_WINDOW:
                 if self.first_client_connected:
                     break
-                time.sleep(1)
+                gevent.sleep(1)
                 
             if not self.first_client_connected:
                 logging.info(f"Channel {self.channel_id}: No clients connected within {Config.INITIAL_CONNECTION_WINDOW}s window")
@@ -326,8 +328,8 @@ class StreamManager:
                 except Exception as e:
                     logging.error(f"Cleanup error: {e}")
                     if "cannot join current thread" not in str(e):
-                        time.sleep(Config.CLIENT_CLEANUP_INTERVAL)
-                time.sleep(Config.CLIENT_CLEANUP_INTERVAL)
+                        gevent.sleep(Config.CLIENT_CLEANUP_INTERVAL)
+                gevent.sleep(Config.CLIENT_CLEANUP_INTERVAL)
 
         if not self.cleanup_started:
             self.cleanup_started = True
@@ -412,7 +414,7 @@ class StreamFetcher:
             logging.error(f"Error extracting base host: {e}")
             return url
     
-    def download(self, url: str) -> tuple[bytes, str]:
+    def download(self, url: str, _depth: int = 0) -> tuple[bytes, str]:
         """
         Download content with connection reuse and redirect handling.
         
@@ -434,7 +436,7 @@ class StreamFetcher:
         now = time.time()
         wait_time = self.last_request_time + self.min_request_interval - now
         if (wait_time > 0):
-            time.sleep(wait_time)
+            gevent.sleep(wait_time)
             
         try:
             # Use cached redirect if available
@@ -457,11 +459,11 @@ class StreamFetcher:
             
         except Exception as e:
             logging.error(f"Download error: {e}")
-            if self.last_host and not url.startswith(self.last_host):
-                # Use urljoin to handle path resolution
+            # M4: Limit recursion depth — only retry once with the last-host fallback
+            if self.last_host and not url.startswith(self.last_host) and _depth < 1:
                 new_url = urljoin(self.last_host + '/', url.split('://')[-1].split('/', 1)[-1])
                 logging.debug(f"Retrying with last host: {new_url}")
-                return self.download(new_url)
+                return self.download(new_url, _depth=_depth + 1)
             raise
 
     def fetch_loop(self):
@@ -479,7 +481,7 @@ class StreamFetcher:
                 if last_manifest_time:
                     time_since_last = current_time - last_manifest_time
                     if time_since_last < (self.manager.target_duration * 0.5):
-                        time.sleep(self.manager.target_duration * 0.5 - time_since_last)
+                        gevent.sleep(self.manager.target_duration * 0.5 - time_since_last)
                         continue
 
                 # Get manifest data
@@ -545,7 +547,7 @@ class StreamFetcher:
                 latest_segment = manifest.segments[-1]
                 if (latest_segment.uri in downloaded_segments):
                     # Wait for next manifest update
-                    time.sleep(self.manager.target_duration * 0.5)
+                    gevent.sleep(self.manager.target_duration * 0.5)
                     continue
 
                 try:
@@ -560,7 +562,7 @@ class StreamFetcher:
                         if verification.get('valid', False):
                             break
                         logging.warning(f"Invalid segment, retry {retry_count + 1}/{max_retries}: {verification.get('error')}")
-                        time.sleep(0.5)  # Short delay before retry
+                        gevent.sleep(0.5)  # Short delay before retry
                         segment_data, _ = self.download(segment_url)
                         retry_count += 1
 
@@ -591,7 +593,7 @@ class StreamFetcher:
 
             except Exception as e:
                 logging.error(f"Fetch error: {e}")
-                time.sleep(retry_delay)
+                gevent.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, max_retry_delay)
 
 def get_segment_sequence(segment_uri: str) -> Optional[int]:
@@ -908,7 +910,7 @@ class ProxyServer:
                     logging.warning(f"Timeout waiting for first segment for channel {channel_id}")
                     return 'No segments available', 503
                     
-                time.sleep(0.1)  # Short sleep to prevent CPU spinning
+                gevent.sleep(0.1)  # Short sleep to prevent CPU spinning
             
             # Rest of manifest generation code...
             with buffer.lock:

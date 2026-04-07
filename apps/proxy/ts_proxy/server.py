@@ -54,11 +54,14 @@ class ProxyServer:
             except Exception:
                 cls._instance = None  # Reset so next call can retry
                 raise
-        # Another greenlet is initializing — wait for completion
+        # Another greenlet is initializing — wait for completion (max 5 s)
+        deadline = time.time() + 5.0
         while True:
             inst = cls._instance
             if inst is not None and inst is not cls._INITIALIZING:
                 return inst
+            if time.time() > deadline:
+                raise RuntimeError("ProxyServer singleton init timed out after 5 s")
             gevent.sleep(0.05)
 
     def __init__(self):
@@ -333,12 +336,12 @@ class ProxyServer:
                     final_delay = delay + jitter
 
                     logger.error(f"Error in event listener: {e}. Retrying in {final_delay:.1f}s (attempt {retry_count})")
-                    gevent.sleep(final_delay)  # REPLACE: time.sleep(final_delay)
+                    gevent.sleep(final_delay)
 
                 except Exception as e:
                     logger.error(f"Error in event listener: {e}")
                     # Add a short delay to prevent rapid retries on persistent errors
-                    gevent.sleep(5)  # REPLACE: time.sleep(5)
+                    gevent.sleep(5)
 
                 finally:
                     # Always clean up PubSub connections in all error paths
@@ -427,24 +430,40 @@ class ProxyServer:
             logger.error(f"Error acquiring channel ownership: {e}")
             return False
 
+    # Lua script: atomically delete owner key only if value matches our worker_id.
+    # Returns 1 if deleted, 0 if key not present or owned by someone else.
+    _RELEASE_OWNERSHIP_SCRIPT = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('del', KEYS[1])
+        else
+            return 0
+        end
+    """
+
     def release_ownership(self, channel_id):
-        """Release ownership of this channel safely"""
+        """Release ownership of this channel atomically via Lua script."""
         if not self.redis_client:
             return
 
         try:
             lock_key = RedisKeys.channel_owner(channel_id)
 
-            # Only delete if we're the current owner to prevent race conditions
-            current = self.redis_client.get(lock_key)
-            if current and current.decode('utf-8') == self.worker_id:
-                self.redis_client.delete(lock_key)
-                logger.info(f"Released ownership of channel {channel_id}")
+            # Atomic compare-and-delete: prevents deleting a new owner's lock
+            released = self.redis_client.eval(
+                self._RELEASE_OWNERSHIP_SCRIPT, 1, lock_key, self.worker_id
+            )
 
-                # Also ensure channel stopping key is set to signal clients
+            if released:
+                logger.info(f"Released ownership of channel {channel_id}")
+                # Signal clients that the channel is stopping
                 stop_key = RedisKeys.channel_stopping(channel_id)
                 self.redis_client.setex(stop_key, 30, "true")
                 logger.info(f"Set stopping signal for channel {channel_id} clients")
+            else:
+                logger.debug(
+                    f"release_ownership: channel {channel_id} not owned by this worker "
+                    f"({self.worker_id}) — skipping delete"
+                )
 
         except Exception as e:
             logger.error(f"Error releasing channel ownership: {e}")
@@ -1283,7 +1302,7 @@ class ProxyServer:
                 else:
                     self._last_orphan_check = time.time()
 
-                gevent.sleep(ConfigHelper.cleanup_check_interval())  # REPLACE: time.sleep(ConfigHelper.cleanup_check_interval())
+                gevent.sleep(ConfigHelper.cleanup_check_interval())
 
         thread = threading.Thread(target=cleanup_task, daemon=True)
         thread.name = "ts-proxy-cleanup"
@@ -1291,43 +1310,47 @@ class ProxyServer:
         logger.info(f"Started TS proxy cleanup thread (interval: {ConfigHelper.cleanup_check_interval()}s)")
 
     def _check_orphaned_channels(self):
-        """Check for orphaned channels in Redis (owner worker crashed)"""
+        """Check for orphaned channels in Redis (owner worker crashed)."""
         if not self.redis_client:
             return
 
         try:
-            # Get all active channel keys
+            # C2: Use SCAN instead of KEYS to avoid blocking Redis
             channel_pattern = "ts_proxy:channel:*:metadata"
-            channel_keys = self.redis_client.keys(channel_pattern)
+            cursor = 0
+            while True:
+                cursor, channel_keys = self.redis_client.scan(
+                    cursor, match=channel_pattern, count=100
+                )
+                for key in channel_keys:
+                    try:
+                        channel_id = key.decode('utf-8').split(':')[2]
 
-            for key in channel_keys:
-                try:
-                    channel_id = key.decode('utf-8').split(':')[2]
+                        # Check if this channel has an owner
+                        owner = self.get_channel_owner(channel_id)
 
-                    # Check if this channel has an owner
-                    owner = self.get_channel_owner(channel_id)
+                        if not owner:
+                            # Check if there are any clients
+                            client_set_key = RedisKeys.clients(channel_id)
+                            client_count = self.redis_client.scard(client_set_key) or 0
 
-                    if not owner:
-                        # Check if there are any clients
-                        client_set_key = RedisKeys.clients(channel_id)
-                        client_count = self.redis_client.scard(client_set_key) or 0
-
-                        if client_count > 0:
-                            # Orphaned channel with clients - we could take ownership
-                            logger.info(f"Found orphaned channel {channel_id} with {client_count} clients")
-                        else:
-                            # Orphaned channel with no clients - clean it up
-                            logger.info(f"Cleaning up orphaned channel {channel_id}")
-
-                            # If we have it locally, stop it properly to clean up processes
-                            if channel_id in self.stream_managers or channel_id in self.client_managers:
-                                logger.info(f"Orphaned channel {channel_id} is local - calling stop_channel")
-                                self.stop_channel(channel_id)
+                            if client_count > 0:
+                                # Orphaned channel with clients — log for awareness
+                                logger.info(f"Found orphaned channel {channel_id} with {client_count} clients")
                             else:
-                                # Just clean up Redis keys for remote channels
-                                self._clean_redis_keys(channel_id)
-                except Exception as e:
-                    logger.error(f"Error processing channel key {key}: {e}")
+                                # Orphaned channel with no clients — clean it up
+                                logger.info(f"Cleaning up orphaned channel {channel_id}")
+
+                                if channel_id in self.stream_managers or channel_id in self.client_managers:
+                                    logger.info(f"Orphaned channel {channel_id} is local - calling stop_channel")
+                                    self.stop_channel(channel_id)
+                                else:
+                                    self._clean_redis_keys(channel_id)
+                    except Exception as e:
+                        logger.error(f"Error processing channel key {key}: {e}")
+
+                if cursor == 0:
+                    break
 
         except Exception as e:
             logger.error(f"Error checking orphaned channels: {e}")
@@ -1341,9 +1364,17 @@ class ProxyServer:
             return
 
         try:
-            # Get all channel metadata keys
+            # C2: Use SCAN instead of KEYS to avoid blocking Redis
             channel_pattern = "ts_proxy:channel:*:metadata"
-            channel_keys = self.redis_client.keys(channel_pattern)
+            cursor = 0
+            channel_keys = []
+            while True:
+                cursor, batch = self.redis_client.scan(
+                    cursor, match=channel_pattern, count=100
+                )
+                channel_keys.extend(batch)
+                if cursor == 0:
+                    break
 
             for key in channel_keys:
                 try:

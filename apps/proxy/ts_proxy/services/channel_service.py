@@ -125,13 +125,23 @@ class ChannelService:
         in_local_managers = channel_id in proxy_server.stream_managers
         in_local_buffers = channel_id in proxy_server.stream_buffers
 
-        # Check Redis for keys
-        redis_keys = None
+        # C2c: Check for specific known keys instead of broad KEYS scan
+        redis_has_keys = False
+        redis_keys = []
         if proxy_server.redis_client:
             try:
-                # This is inefficient but used for diagnostics - in production would use more targeted checks
-                redis_keys = proxy_server.redis_client.keys(f"ts_proxy:*:{channel_id}*")
-                redis_keys = [k.decode('utf-8') for k in redis_keys] if redis_keys else []
+                from ..redis_keys import RedisKeys as RK
+                known_keys = [
+                    RK.channel_metadata(channel_id),
+                    RK.channel_owner(channel_id),
+                    RK.clients(channel_id),
+                ]
+                pipe = proxy_server.redis_client.pipeline()
+                for k in known_keys:
+                    pipe.exists(k)
+                results = pipe.execute()
+                redis_keys = [k for k, exists in zip(known_keys, results) if exists]
+                redis_has_keys = bool(redis_keys)
             except Exception as e:
                 logger.error(f"Error checking Redis keys: {e}")
 
@@ -142,12 +152,12 @@ class ChannelService:
         logger.info(f"Channel {channel_id} diagnostics: "
                    f"in_local_managers={in_local_managers}, "
                    f"in_local_buffers={in_local_buffers}, "
-                   f"redis_keys_count={len(redis_keys) if redis_keys else 0}, "
+                   f"redis_keys_found={redis_keys}, "
                    f"channel_exists={channel_exists}")
 
         if not channel_exists:
             # Try to recover if Redis keys exist but channel check failed
-            if redis_keys:
+            if redis_has_keys:
                 logger.warning(f"Channel {channel_id} not detected but Redis keys exist. Forcing initialization.")
                 proxy_server.initialize_channel(new_url, channel_id, user_agent)
                 result = {

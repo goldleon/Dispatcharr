@@ -23,6 +23,21 @@ from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
 
+
+def _decode_redis_hash(data: dict) -> dict:
+    """H5: Safely decode a Redis hgetall() response to str→str dict.
+
+    Handles both bytes-key and str-key responses without crashing on empty dicts.
+    """
+    if not data:
+        return {}
+    # Detect encoding by checking first key type; fallback to identity if already str
+    first_key = next(iter(data))
+    if isinstance(first_key, bytes):
+        return {k.decode('utf-8'): (v.decode('utf-8') if isinstance(v, bytes) else v)
+                for k, v in data.items()}
+    return {k: (v.decode('utf-8') if isinstance(v, bytes) else v) for k, v in data.items()}
+
 class ProviderConnectionLimitError(Exception):
 
     """Raised when the IPTV provider returns HTTP 458 (max connections reached)."""
@@ -231,9 +246,8 @@ class RedisBackedVODConnection:
             if not data:
                 return None
 
-            # Convert bytes keys/values to strings if needed
-            if isinstance(list(data.keys())[0], bytes):
-                data = {k.decode('utf-8'): v.decode('utf-8') for k, v in data.items()}
+            # H5: Use safe decode helper — handles empty dict without IndexError
+            data = _decode_redis_hash(data)
 
             return SerializableConnectionState.from_dict(data)
         except Exception as e:
@@ -1419,23 +1433,22 @@ class MultiWorkerVODConnectionManager:
                         if not data:
                             continue
 
-                        # Convert bytes to strings if needed
-                        if isinstance(list(data.keys())[0], bytes):
-                            data = {k.decode('utf-8'): v.decode('utf-8') for k, v in data.items()}
+                        # H5: Use safe decode helper
+                        data = _decode_redis_hash(data)
 
                         last_activity = float(data.get('last_activity', 0))
                         active_streams = int(data.get('active_streams', 0))
 
                         # Reconcile counter drift before deciding whether to cleanup
-                        session_id = key.decode('utf-8').replace('vod_persistent_connection:', '')
+                        session_id_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                        session_id = session_id_str.replace('vod_persistent_connection:', '')
                         if active_streams > 0:
                             redis_connection = RedisBackedVODConnection(session_id, self.redis_client)
                             redis_connection.reconcile_active_streams()
                             # Re-read after reconciliation
                             refreshed = self.redis_client.hgetall(key)
                             if refreshed:
-                                if isinstance(list(refreshed.keys())[0], bytes):
-                                    refreshed = {k.decode('utf-8'): v.decode('utf-8') for k, v in refreshed.items()}
+                                refreshed = _decode_redis_hash(refreshed)
                                 active_streams = int(refreshed.get('active_streams', 0))
 
                         # Clean up if stale and no active streams
