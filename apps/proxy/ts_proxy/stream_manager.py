@@ -8,8 +8,6 @@ import requests
 import subprocess
 import gevent
 import re
-from typing import Optional, List
-from django.db import connection
 from django.shortcuts import get_object_or_404
 from urllib3.exceptions import ReadTimeoutError
 from apps.proxy.config import TSConfig as Config
@@ -252,6 +250,7 @@ class StreamManager:
 
     def run(self):
         """Main execution loop using HTTP streaming with improved connection handling and stream switching"""
+        from django.db import connection
         # Add a stop flag to the class properties
         self.stop_requested = False
         # Add tracking for stream switching attempts
@@ -634,6 +633,7 @@ class StreamManager:
 
     def _read_stderr(self):
         """Read and log ffmpeg stderr output with optimized chunked reading"""
+        from django.db import connection
         try:
             buffer = b""
             # Use 4KB chunks for optimal throughput/latency trade-off
@@ -1190,6 +1190,7 @@ class StreamManager:
 
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
+        from django.db import connection
         consecutive_unhealthy_checks = 0
         max_unhealthy_checks = 3
 

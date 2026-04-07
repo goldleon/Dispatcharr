@@ -2237,6 +2237,7 @@ def refresh_account_profiles(account_id):
 @shared_task
 def refresh_account_info(profile_id):
     """Refresh only the account information for a specific M3U profile."""
+    from django.db import connection
     if not acquire_task_lock("refresh_account_info", profile_id):
         return f"Account info refresh task already running for profile_id={profile_id}."
 
