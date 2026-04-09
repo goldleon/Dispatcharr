@@ -449,15 +449,10 @@ class StreamManager:
             # Enhanced cleanup in the finally block
             self.connected = False
 
-            # Explicitly cancel all timers
-            for timer in list(self._buffer_check_timers):
-                try:
-                    if timer and timer.is_alive():
-                        timer.cancel()
-                except Exception:
-                    pass
-
-            self._buffer_check_timers.clear()
+            # C4: Kill buffer check greenlet instead of old timer list
+            if self._buffer_check_greenlet and not self._buffer_check_greenlet.dead:
+                self._buffer_check_greenlet.kill(block=False)
+            self._buffer_check_greenlet = None
 
             # Make sure transcode process is terminated
             if self.transcode_process_active:
@@ -1447,16 +1442,11 @@ class StreamManager:
                     logger.debug(f"Error clearing transcode flag for channel {self.channel_id}: {e}")
         self.socket = None
         self.connected = False
-        # Cancel any remaining buffer check timers
-        for timer in list(self._buffer_check_timers):
-            try:
-                if timer and timer.is_alive():
-                    timer.cancel()
-                    logger.debug(f"Cancelled buffer check timer during socket close for channel {self.channel_id}")
-            except Exception as e:
-                logger.debug(f"Error canceling timer during socket close for channel {self.channel_id}: {e}")
-
-        self._buffer_check_timers = []
+        # C4: Kill buffer check greenlet instead of old timer list
+        if self._buffer_check_greenlet and not self._buffer_check_greenlet.dead:
+            self._buffer_check_greenlet.kill(block=False)
+            logger.debug(f"Killed buffer check greenlet during socket close for channel {self.channel_id}")
+        self._buffer_check_greenlet = None
 
     def fetch_chunk(self):
         """Fetch data from socket with timeout handling"""
