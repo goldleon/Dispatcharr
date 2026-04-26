@@ -1,19 +1,14 @@
-# yourapp/tasks.py
 from celery import shared_task
-from channels.layers import get_channel_layer
-from asgiref.sync import async_to_sync
-import redis
 import json
 import logging
 import re
-import gc  # Add import for garbage collection
+import gc
+import time
 from core.utils import RedisClient
 from apps.proxy.ts_proxy.channel_status import ChannelStatus
 from core.utils import send_websocket_update
-from apps.proxy.vod_proxy.connection_manager import get_connection_manager
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager
 from apps.m3u.models import M3UAccountProfile
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +29,7 @@ def fetch_channel_stats():
         while True:
             cursor, keys = redis_client.scan(cursor, match=channel_pattern)
             for key in keys:
-                channel_id_match = re.search(r"ts_proxy:channel:(.*):metadata", key.decode('utf-8'))
+                channel_id_match = re.search(r"ts_proxy:channel:(.*):metadata", key)
                 if channel_id_match:
                     ch_id = channel_id_match.group(1)
                     channel_info = ChannelStatus.get_basic_channel_info(ch_id)
@@ -64,31 +59,6 @@ def fetch_channel_stats():
     all_channels = None
     gc.collect()
 
-@shared_task
-def cleanup_vod_connections():
-    """Clean up stale VOD connections (Consolidated and Legacy)"""
-    try:
-        # Legacy manager cleanup
-        connection_manager = get_connection_manager()
-        connection_manager.cleanup_stale_connections(max_age_seconds=1800)  # 30 mins
-        
-        # Multi-worker manager cleanup
-        mw_manager = MultiWorkerVODConnectionManager.get_instance()
-        mw_manager.cleanup_stale_persistent_connections(max_age_seconds=1800)
-        
-        logger.info("VOD connection cleanup completed")
-    except Exception as e:
-        logger.error(f"Error in VOD connection cleanup: {e}", exc_info=True)
-
-@shared_task
-def cleanup_vod_heartbeats():
-    """Clean up expired profile connection heartbeats (ZSET)"""
-    try:
-        mw_manager = MultiWorkerVODConnectionManager.get_instance()
-        mw_manager.cleanup_all_profile_heartbeats()
-        logger.info("VOD profile heartbeat cleanup completed")
-    except Exception as e:
-        logger.error(f"Error in VOD heartbeat cleanup: {e}", exc_info=True)
 
 @shared_task
 def reconcile_profile_connections():
@@ -126,7 +96,7 @@ def reconcile_profile_connections():
                         total_counts[p_id] = total_counts.get(p_id, 0) + 1
                 except (IndexError, ValueError, TypeError) as e:
                     logger.error(f"Error processing stream_profile key {key}: {e}")
-            
+
             if cursor == 0:
                 break
 
@@ -140,35 +110,35 @@ def reconcile_profile_connections():
                 try:
                     # Key is profile_connections:{id}:zset
                     p_id = int(key.split(':')[1])
-                    
+
                     # Purge expired heartbeats (score is timestamp when they expire or last update)
                     # Note: MW manager uses score = current_time + 60
                     # We purge members older than current_time
                     redis_client.zremrangebyscore(key, "-inf", current_time)
                     vod_count = redis_client.zcard(key) or 0
-                    
+
                     if vod_count > 0:
                         total_counts[p_id] = total_counts.get(p_id, 0) + vod_count
                 except (IndexError, ValueError, TypeError) as e:
                     logger.error(f"Error processing VOD zset key {key}: {e}")
-            
+
             if cursor == 0:
                 break
 
         # 3. Synchronize with Database and Update Redis Counters
         active_profiles = M3UAccountProfile.objects.filter(is_active=True)
         synced_count = 0
-        
+
         # Track which profiles we updated to handle those that dropped to 0
         processed_ids = set()
 
         for profile in active_profiles:
             actual_count = total_counts.get(profile.id, 0)
             processed_ids.add(profile.id)
-            
+
             # Update Redis counter (the one used for INCR/DECR locks)
             redis_client.set(f"profile_connections:{profile.id}", actual_count)
-            
+
             # Update DB field if changed
             if profile.active_streams != actual_count:
                 logger.info(f"Reconciliation: Correcting profile {profile.id} count {profile.active_streams} -> {actual_count}")
@@ -185,7 +155,7 @@ def reconcile_profile_connections():
                 # Skip zset keys
                 if key.endswith(':zset'):
                     continue
-                
+
                 try:
                     p_id = int(key.split(':')[1])
                     if p_id not in processed_ids:
@@ -193,7 +163,7 @@ def reconcile_profile_connections():
                         redis_client.delete(key)
                 except (IndexError, ValueError):
                     continue
-            
+
             if cursor == 0:
                 break
 

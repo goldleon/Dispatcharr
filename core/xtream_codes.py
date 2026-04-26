@@ -62,12 +62,12 @@ class Client:
             url = f"{self.server_url}/{endpoint}"
             logger.debug(f"XC API Request: {url} with params: {params}")
 
-            response = self.session.get(url, params=params, timeout=30)
+            response = self.session.get(url, params=params, timeout=60)
 
             # Handle specific HTTP status codes before raise_for_status()
             if response.status_code == 451:
                 error_msg = (
-                    f"XC API request blocked with HTTP 451 (Unavailable For Legal Reasons) from {url}. "
+                    f"XC API request to {url} was blocked (HTTP 451 - Unavailable For Legal Reasons). "
                     f"The provider may be geo-blocking this content or restricting access to this API endpoint."
                 )
                 logger.warning(error_msg)

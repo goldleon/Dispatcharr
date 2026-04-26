@@ -61,7 +61,7 @@ class ChannelService:
             # Verify the stream_id was set
             stream_id_value = proxy_server.redis_client.hget(metadata_key, ChannelMetadataField.STREAM_ID)
             if stream_id_value:
-                logger.debug(f"Verified stream_id {stream_id_value.decode('utf-8')} is now set in Redis")
+                logger.debug(f"Verified stream_id {stream_id_value} is now set in Redis")
             else:
                 logger.error(f"Failed to set stream_id {stream_id} in Redis before initialization")
 
@@ -178,15 +178,6 @@ class ChannelService:
         else:
             result = {'status': 'success'}
 
-        # Update metadata in Redis regardless of ownership
-        if proxy_server.redis_client:
-            try:
-                ChannelService._update_channel_metadata(channel_id, new_url, user_agent, stream_id, m3u_profile_id)
-                result['metadata_updated'] = True
-            except Exception as e:
-                logger.error(f"Error updating Redis metadata: {e}", exc_info=True)
-                result['metadata_updated'] = False
-
         # If we're the owner, update directly
         if proxy_server.am_i_owner(channel_id) and channel_id in proxy_server.stream_managers:
             logger.info(f"This worker is the owner, changing stream URL for channel {channel_id}")
@@ -197,14 +188,33 @@ class ChannelService:
             success = manager.update_url(new_url, stream_id, m3u_profile_id)
             logger.info(f"Stream URL changed from {old_url} to {new_url}, result: {success}")
 
+            # Update Redis metadata based on the actual outcome.
+            # On success, write the new values. On failure, restore whatever URL
+            # the manager will actually reconnect to (may be old_url if the
+            # exception happened before self.url was reassigned, or new_url if it
+            # happened after) so Redis never describes a URL that isn't in use.
+            if proxy_server.redis_client:
+                try:
+                    if success:
+                        ChannelService._update_channel_metadata(channel_id, new_url, user_agent, stream_id, m3u_profile_id)
+                    else:
+                        ChannelService._update_channel_metadata(channel_id, manager.url, user_agent)
+                    result['metadata_updated'] = True
+                except Exception as e:
+                    logger.error(f"Error updating Redis metadata: {e}", exc_info=True)
+                    result['metadata_updated'] = False
+
             result.update({
                 'direct_update': True,
                 'success': success,
                 'worker_id': proxy_server.worker_id
             })
         else:
-            # If we're not the owner, publish an event for the owner to pick up
-            logger.info(f"Not the owner, requesting URL change via Redis PubSub")
+            # Not the owner: publish the switch event. The owner will update metadata
+            # after the actual switch attempt succeeds (or roll back on failure).
+            # All needed info (url, user_agent, stream_id, m3u_profile_id) is carried
+            # in the pubsub message, so there is no reason to pre-write metadata here.
+            logger.debug(f"This worker is not the owner, publishing stream switch event for channel {channel_id}")
             if proxy_server.redis_client:
                 ChannelService._publish_stream_switch_event(channel_id, new_url, user_agent, stream_id, m3u_profile_id)
                 result.update({
@@ -246,8 +256,8 @@ class ChannelService:
             metadata_key = RedisKeys.channel_metadata(channel_id)
             try:
                 metadata = proxy_server.redis_client.hgetall(metadata_key)
-                if metadata and b'state' in metadata:
-                    state = metadata[b'state'].decode('utf-8')
+                if metadata and 'state' in metadata:
+                    state = metadata['state']
                     channel_info = {"state": state}
 
                     # Immediately mark as stopping in metadata so clients detect it faster
@@ -392,8 +402,8 @@ class ChannelService:
             metadata = proxy_server.redis_client.hgetall(metadata_key)
 
             # Extract state and owner
-            state = metadata.get(ChannelMetadataField.STATE.encode(), b'unknown').decode('utf-8')
-            owner = metadata.get(ChannelMetadataField.OWNER.encode(), b'unknown').decode('utf-8')
+            state = metadata.get(ChannelMetadataField.STATE, 'unknown')
+            owner = metadata.get(ChannelMetadataField.OWNER, 'unknown')
 
             # Valid states indicate channel is running properly
             valid_states = [ChannelState.ACTIVE, ChannelState.WAITING_FOR_CLIENTS, ChannelState.CONNECTING]
@@ -419,7 +429,7 @@ class ChannelService:
             }
 
             if last_data:
-                last_data_time = float(last_data.decode('utf-8'))
+                last_data_time = float(last_data)
                 data_age = time.time() - last_data_time
                 details["last_data_age"] = data_age
 
@@ -442,13 +452,13 @@ class ChannelService:
         try:
             # Use factory to parse the line based on stream type
             parsed_data = LogParserFactory.parse(stream_type, stream_info_line)
-            
+
             if not parsed_data:
                 return
 
             # Update Redis and database with parsed data
             ChannelService._update_stream_info_in_redis(
-                channel_id, 
+                channel_id,
                 parsed_data.get('video_codec'),
                 parsed_data.get('resolution'),
                 parsed_data.get('width'),
@@ -589,7 +599,7 @@ class ChannelService:
         metadata_key = RedisKeys.channel_metadata(channel_id)
 
         # First check if the key exists and what type it is
-        key_type = proxy_server.redis_client.type(metadata_key).decode('utf-8')
+        key_type = proxy_server.redis_client.type(metadata_key)
         logger.debug(f"Redis key {metadata_key} is of type: {key_type}")
 
         # Build metadata update dict

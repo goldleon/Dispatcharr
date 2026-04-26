@@ -2,6 +2,7 @@ import { useLocation } from 'react-router-dom';
 import React, { useEffect, useMemo, useState } from 'react';
 import usePlaylistsStore from '../../store/playlists.jsx';
 import useSettingsStore from '../../store/settings.jsx';
+import useUsersStore from '../../store/users.jsx';
 import {
   ActionIcon,
   Badge,
@@ -45,7 +46,6 @@ import {
   getChannelStreams,
   getLogoUrl,
   getM3uAccountsMap,
-  getMatchingStreamByUrl,
   getSelectedStream,
   getStartDate,
   getStreamOptions,
@@ -123,6 +123,8 @@ const StreamConnectionCard = ({
 
   // Get M3U account data from the playlists store
   const m3uAccounts = usePlaylistsStore((s) => s.playlists);
+  // Get users for resolving user_id → username on client rows
+  const users = useUsersStore((s) => s.users);
   // Get settings for speed threshold and environment mode
   const settings = useSettingsStore((s) => s.settings);
   const env_mode =
@@ -137,6 +139,15 @@ const StreamConnectionCard = ({
   const m3uAccountsMap = useMemo(() => {
     return getM3uAccountsMap(m3uAccounts);
   }, [m3uAccounts]);
+
+  // Create a map of user IDs to usernames for quick lookup
+  const usersMap = useMemo(() => {
+    const map = {};
+    users.forEach((u) => {
+      map[String(u.id)] = u.username;
+    });
+    return map;
+  }, [users]);
 
   // Update M3U profile information when channel data changes
   useEffect(() => {
@@ -164,18 +175,13 @@ const StreamConnectionCard = ({
           // Use streams in the order returned by the API without sorting
           setAvailableStreams(streamData);
 
-          // If we have a channel URL, try to find the matching stream
-          if (channel.url && streamData.length > 0) {
-            // Try to find matching stream based on URL
-            const matchingStream = getMatchingStreamByUrl(
-              streamData,
-              channel.url
+          // Match by server-reported stream_id.
+          if (channel.stream_id && streamData.length > 0) {
+            const matchingStream = streamData.find(
+              (s) => s.id.toString() === channel.stream_id.toString()
             );
-
             if (matchingStream) {
               setActiveStreamId(matchingStream.id.toString());
-
-              // If the stream has M3U profile info, save it
               if (matchingStream.m3u_profile) {
                 setCurrentM3UProfile(matchingStream.m3u_profile);
               }
@@ -190,7 +196,7 @@ const StreamConnectionCard = ({
     };
 
     fetchStreams();
-  }, [channel.channel_id, channel.url, channelsByUUID]);
+  }, [channel.channel_id, channel.stream_id, channelsByUUID]);
 
   useEffect(() => {
     setData(
@@ -314,7 +320,8 @@ const StreamConnectionCard = ({
       {
         header: 'IP Address',
         accessorKey: 'ip_address',
-        size: 150,
+        grow: true,
+        minSize: 85,
         cell: ({ cell }) => (
           <Tooltip label={cell.getValue()}>
             <Text size="xs" truncate style={{ maxWidth: '100%' }}>
@@ -323,10 +330,29 @@ const StreamConnectionCard = ({
           </Tooltip>
         ),
       },
+      {
+        id: 'user',
+        header: 'User',
+        grow: true,
+        minSize: 60,
+        accessorFn: (row) => {
+          const uid = row.user_id ? String(row.user_id) : null;
+          if (!uid || uid === '0') return 'Anonymous';
+          return usersMap[uid] || `User ${uid}`;
+        },
+        cell: ({ cell }) => (
+          <Text size="xs" truncate style={{ maxWidth: '100%' }}>
+            {cell.getValue()}
+          </Text>
+        ),
+      },
       // Updated Connected column with tooltip
       {
         id: 'connected',
         header: 'Connected',
+        grow: 1.5,
+        minSize: 70,
+        maxSize: 150,
         accessorFn: connectedAccessor(fullDateTimeFormat),
         cell: ({ cell }) => (
           <Tooltip
@@ -336,7 +362,9 @@ const StreamConnectionCard = ({
                 : 'Unknown connection time'
             }
           >
-            <Text size="xs">{cell.getValue()}</Text>
+            <Text size="xs" truncate style={{ maxWidth: '100%' }}>
+              {cell.getValue()}
+            </Text>
           </Tooltip>
         ),
       },
@@ -344,6 +372,8 @@ const StreamConnectionCard = ({
       {
         id: 'duration',
         header: 'Duration',
+        size: 82,
+        minSize: 60,
         accessorFn: durationAccessor(),
         cell: ({ cell, row }) => {
           const exactDuration =
@@ -356,7 +386,9 @@ const StreamConnectionCard = ({
                   : 'Unknown duration'
               }
             >
-              <Text size="xs">{cell.getValue()}</Text>
+              <Text size="xs" style={{ whiteSpace: 'nowrap' }}>
+                {cell.getValue()}
+              </Text>
             </Tooltip>
           );
         },
@@ -364,10 +396,11 @@ const StreamConnectionCard = ({
       {
         id: 'actions',
         header: 'Actions',
-        size: 100,
+        size: 60,
+        minSize: 40,
       },
     ],
-    [fullDateTimeFormat]
+    [fullDateTimeFormat, usersMap]
   );
 
   const channelClientsTable = useTable({
@@ -383,6 +416,7 @@ const StreamConnectionCard = ({
     }),
     headerCellRenderFns: {
       ip_address: renderHeaderCell,
+      user: renderHeaderCell,
       connected: renderHeaderCell,
       duration: renderHeaderCell,
       actions: renderHeaderCell,
@@ -610,8 +644,9 @@ const StreamConnectionCard = ({
         {currentProgram &&
           isProgramDescExpanded &&
           currentProgram.start_time &&
-          currentProgram.end_time &&
-          <ProgramProgress currentProgram={currentProgram} />}
+          currentProgram.end_time && (
+            <ProgramProgress currentProgram={currentProgram} />
+          )}
 
         {/* Add stream selection dropdown and preview button */}
         {availableStreams.length > 0 && (

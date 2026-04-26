@@ -150,6 +150,10 @@ describe('FloatingVideo', () => {
           type: 'mpegts',
           url: 'http://example.com/stream.ts',
           isLive: true,
+        }),
+        expect.objectContaining({
+          enableWorker: true,
+          enableStashBuffer: false,
         })
       );
     });
@@ -239,8 +243,9 @@ describe('FloatingVideo', () => {
       const { container } = render(<FloatingVideo />);
       const video = container.querySelector('video');
 
-      // Simulate video loaded event to clear loading state
+      // Simulate video loaded and canplay events to clear loading state and show overlay
       fireEvent.loadedData(video);
+      fireEvent.canPlay(video);
 
       expect(screen.getAllByText('Test Movie').length).toBeGreaterThanOrEqual(
         1
