@@ -107,7 +107,7 @@ class ClientManager:
                     for _ in range(int(self.heartbeat_interval)):
                         if not self._heartbeat_running:
                             break
-                        gevent.sleep(1)  # Non-blocking: yields control to the gevent event loop
+                        time.sleep(1)  # Sleep in 1-second increments to allow faster stop response
 
                     # Final check before doing work
                     if not self._heartbeat_running:
@@ -362,9 +362,12 @@ class ClientManager:
                     if remaining == 0:
                         # Trigger shutdown check directly via ProxyServer method
                         logger.debug(f"No clients left - triggering immediate shutdown check")
-                        # Spawn greenlet to avoid blocking
-                        import gevent
-                        gevent.spawn(self.proxy_server.handle_client_disconnect, self.channel_id)
+                        # Spawn thread to avoid blocking the caller
+                        threading.Thread(
+                            target=self.proxy_server.handle_client_disconnect,
+                            args=(self.channel_id,),
+                            daemon=True,
+                        ).start()
                 else:
                     # We're not the owner - publish event so owner can handle it
                     logger.debug(f"Non-owner publishing CLIENT_DISCONNECTED event for client {client_id} on channel {self.channel_id} from worker {self.worker_id}")

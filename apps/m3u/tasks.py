@@ -1624,66 +1624,6 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
             if valid_stream_count % 1000 == 0:
                 logger.debug(f"Processed {valid_stream_count} valid streams so far for M3U account: {account_id}")
 
-                    extinf_data.append(parsed)
-                else:
-                    # Log problematic EXTINF lines
-                    logger.warning(
-                        f"Failed to parse EXTINF at line {line_index+1}: {line[:200]}"
-                    )
-                    problematic_lines.append((line_index + 1, line[:200]))
-
-            elif line.startswith("#EXTVLCOPT:"):
-                if extinf_data:
-                    opt_content = line[len("#EXTVLCOPT:"):].strip()
-                    if "=" in opt_content:
-                        k, v = opt_content.split("=", 1)
-                        k_low = k.strip().lower()
-                        v_val = v.strip()
-                        
-                        if "extvlcopt" not in extinf_data[-1]:
-                            extinf_data[-1]["extvlcopt"] = {}
-                        
-                        # Handle common aliases
-                        if k_low in ["http-referrer", "referrer"]:
-                            extinf_data[-1]["extvlcopt"]["http-referrer"] = v_val
-                        elif k_low in ["http-origin", "origin"]:
-                            extinf_data[-1]["extvlcopt"]["http-origin"] = v_val
-                        elif k_low in ["http-user-agent", "user-agent", "ua"]:
-                            extinf_data[-1]["extvlcopt"]["http-user-agent"] = v_val
-                        else:
-                            extinf_data[-1]["extvlcopt"][k.strip()] = v_val
-
-            elif extinf_data and (line.startswith("http") or line.startswith("rtsp") or line.startswith("rtp") or line.startswith("udp")):
-                url_count += 1
-                # Normalize UDP URLs only (e.g., remove VLC-specific @ prefix)
-                normalized_url = normalize_stream_url(line) if line.startswith("udp") else line
-                # Associate URL with the last EXTINF line
-                extinf_data[-1]["url"] = normalized_url
-                valid_stream_count += 1
-
-                # Periodically log progress for large files
-                if valid_stream_count % 1000 == 0:
-                    logger.debug(
-                        f"Processed {valid_stream_count} valid streams so far for M3U account: {account_id}"
-                    )
-
-        # Log summary statistics
-        logger.info(
-            f"M3U parsing complete - Lines: {line_count}, EXTINF: {extinf_count}, URLs: {url_count}, Valid streams: {valid_stream_count}"
-        )
-
-        if problematic_lines:
-            logger.warning(
-                f"Found {len(problematic_lines)} problematic lines during parsing"
-            )
-            for i, (line_num, content) in enumerate(
-                problematic_lines[:10]
-            ):  # Log max 10 examples
-                logger.warning(f"Problematic line #{i+1} at line {line_num}: {content}")
-            if len(problematic_lines) > 10:
-                logger.warning(
-                    f"... and {len(problematic_lines) - 10} more problematic lines"
-                )
         logger.info(f"M3U parsing complete - Valid streams: {valid_stream_count}")
 
         # Log group statistics

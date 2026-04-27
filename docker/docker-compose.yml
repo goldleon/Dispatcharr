@@ -7,7 +7,7 @@ services:
   # Web Service
   # ============================================================================
   web:
-    image: ghcr.io/dispatcharr/dispatcharr:latest
+    image: dispatcharr:latest
     container_name: dispatcharr_web
     restart: unless-stopped
     ports:
