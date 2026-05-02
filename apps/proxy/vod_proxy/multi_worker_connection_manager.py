@@ -9,6 +9,7 @@ import threading
 import random
 import re
 import requests
+import requests.exceptions
 import pickle
 import base64
 import os
@@ -1241,6 +1242,30 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread.daemon = True
                         cleanup_thread.start()
 
+                except requests.exceptions.ChunkedEncodingError as e:
+                    # IncompleteRead wrapped by requests — upstream dropped the connection
+                    # mid-transfer (provider closed early, network blip, or a concurrent
+                    # generator for the same session closed the shared HTTP response).
+                    # Log at WARNING level since this is often a client/provider issue,
+                    # not a code bug. Do NOT yield any bytes — injecting text into a
+                    # binary video stream would corrupt the player's buffer.
+                    logger.warning(f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream: {e}")
+                    if not stream_decremented:
+                        stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                    else:
+                        has_remaining = redis_connection.has_active_streams()
+
+                    if not has_remaining and not profile_decremented:
+                        state = redis_connection._get_connection_state()
+                        profile_id = state.m3u_profile_id if state else m3u_profile.id
+                        if profile_id:
+                            self._decrement_profile_connections(profile_id, effective_session_id)
+                            profile_decremented = True
+                            logger.info(f"[{client_id}] Profile session {effective_session_id} removed on upstream drop")
+                        redis_connection.cleanup(current_worker_id=self.worker_id)
+                    # Return without yielding — let the streaming response close cleanly
+                    return
+
                 except Exception as e:
                     logger.error(f"[{client_id}] Worker {self.worker_id} - Error in Redis-backed stream: {e}")
                     if not stream_decremented:
@@ -1259,7 +1284,9 @@ class MultiWorkerVODConnectionManager:
                         # Smart cleanup on error - immediate cleanup since we're in error state
                         # No connection_manager — profile already decremented above
                         redis_connection.cleanup(current_worker_id=self.worker_id)
-                    yield b"Error: Stream interrupted"
+                    # Do NOT yield error bytes — injecting text into a binary video stream
+                    # corrupts the player buffer. Return cleanly instead.
+                    return
 
                 finally:
                     if not stream_decremented:
