@@ -1572,6 +1572,31 @@ class StreamManager:
                     except Exception as e:
                         logger.error(f"Error checking current state: {e}")
 
+                    # During a reconnect, skip the grace period entirely.
+                    # The channel was already ACTIVE with clients before the
+                    # provider dropped — re-entering waiting_for_clients would
+                    # impose a needless grace-period stall on all connected viewers.
+                    if getattr(self, 'reconnecting', False):
+                        try:
+                            client_set_key = RedisKeys.clients(channel_id)
+                            client_count = redis_client.scard(client_set_key) or 0
+                        except Exception:
+                            client_count = 0
+
+                        if client_count > 0:
+                            update_data = {
+                                ChannelMetadataField.STATE: ChannelState.ACTIVE,
+                                ChannelMetadataField.STATE_CHANGED_AT: current_time,
+                            }
+                            redis_client.hset(metadata_key, mapping=update_data)
+                            logger.info(
+                                f"STREAM MANAGER (reconnect): skipped grace period for "
+                                f"channel {channel_id} — {client_count} client(s) already "
+                                f"connected, going straight to {ChannelState.ACTIVE}"
+                            )
+                            return True
+                        # No clients during reconnect — fall through to normal path.
+
                     # Only update if not already past connecting
                     if not current_state or current_state in [ChannelState.INITIALIZING, ChannelState.CONNECTING]:
                         # NEW CODE: Check if buffer has enough chunks

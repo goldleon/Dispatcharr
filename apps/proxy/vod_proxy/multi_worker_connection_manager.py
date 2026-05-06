@@ -1246,10 +1246,56 @@ class MultiWorkerVODConnectionManager:
                     # IncompleteRead wrapped by requests — upstream dropped the connection
                     # mid-transfer (provider closed early, network blip, or a concurrent
                     # generator for the same session closed the shared HTTP response).
-                    # Log at WARNING level since this is often a client/provider issue,
-                    # not a code bug. Do NOT yield any bytes — injecting text into a
-                    # binary video stream would corrupt the player's buffer.
-                    logger.warning(f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream: {e}")
+                    # Attempt to resume from the byte offset we reached using a Range
+                    # header, up to MAX_RESUME_RETRIES times, before giving up.
+                    MAX_RESUME_RETRIES = 3
+                    resume_attempted = False
+                    for resume_attempt in range(1, MAX_RESUME_RETRIES + 1):
+                        if bytes_sent == 0:
+                            # Nothing sent yet — no point resuming
+                            break
+                        resume_range = f"bytes={bytes_sent}-"
+                        logger.warning(
+                            f"[{client_id}] Worker {self.worker_id} - Upstream connection "
+                            f"dropped at {bytes_sent:,} bytes (attempt {resume_attempt}/{MAX_RESUME_RETRIES}). "
+                            f"Trying resume with {resume_range}"
+                        )
+                        try:
+                            resumed_response = redis_connection.get_stream(resume_range)
+                            if resumed_response is None:
+                                logger.warning(f"[{client_id}] Resume attempt {resume_attempt} — range not satisfiable, stopping")
+                                break
+                            # Stream resumed — yield remaining chunks
+                            for chunk in resumed_response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    yield chunk
+                                    bytes_sent += len(chunk)
+                                    chunk_count += 1
+                                    if chunk_count % 100 == 0:
+                                        if self.redis_client and self.redis_client.exists(stop_key):
+                                            self.redis_client.delete(stop_key)
+                                            stop_signal_detected = True
+                                            break
+                                        self._refresh_profile_heartbeat(m3u_profile.id, effective_session_id)
+                            # Completed without another drop
+                            logger.info(f"[{client_id}] Worker {self.worker_id} - Resume completed after {resume_attempt} attempt(s): {bytes_sent:,} total bytes sent")
+                            resume_attempted = True
+                            break
+                        except requests.exceptions.ChunkedEncodingError as retry_e:
+                            logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
+                            time.sleep(0.5 * resume_attempt)  # brief back-off before next retry
+                        except Exception as retry_e:
+                            logger.error(f"[{client_id}] Resume attempt {resume_attempt} failed: {retry_e}")
+                            break
+                    else:
+                        logger.warning(
+                            f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream "
+                            f"and all {MAX_RESUME_RETRIES} resume attempts failed: {e}"
+                        )
+
+                    if not resume_attempted:
+                        logger.warning(f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream (no resume): {e}")
+
                     if not stream_decremented:
                         stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
                     else:
@@ -1263,7 +1309,7 @@ class MultiWorkerVODConnectionManager:
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on upstream drop")
                         redis_connection.cleanup(current_worker_id=self.worker_id)
-                    # Return without yielding — let the streaming response close cleanly
+                    # Return without yielding error bytes
                     return
 
                 except Exception as e:
