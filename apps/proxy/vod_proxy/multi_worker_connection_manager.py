@@ -1202,7 +1202,7 @@ class MultiWorkerVODConnectionManager:
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on normal completion")
 
                         def delayed_cleanup():
-                            time.sleep(1)  # Wait 1 second
+                            time.sleep(3)  # Wait 3 seconds to allow rapid-seeking clients to reconnect
                             # Smart cleanup: check active streams and ownership
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after normal completion")
                             # No connection_manager — profile already decremented above
@@ -1231,7 +1231,7 @@ class MultiWorkerVODConnectionManager:
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on client disconnect")
 
                         def delayed_cleanup():
-                            time.sleep(1)  # Wait 1 second
+                            time.sleep(3)  # Wait 3 seconds to allow rapid-seeking clients to reconnect
                             # Smart cleanup: check active streams and ownership
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after client disconnect")
                             # No connection_manager — profile already decremented above
@@ -1290,22 +1290,28 @@ class MultiWorkerVODConnectionManager:
 
                 finally:
                     if not stream_decremented:
-                        stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                        # Retry up to 3 times if lock contention prevents decrement
+                        for _retry in range(3):
+                            stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                            if stream_decremented:
+                                break
+                            time.sleep(0.05)  # Brief back-off before retry
                         if stream_decremented and not has_remaining and not profile_decremented:
                             state = redis_connection._get_connection_state()
                             profile_id = state.m3u_profile_id if state else m3u_profile.id
                             if profile_id:
-                                self._decrement_profile_connections(profile_id)
+                                # Bug fix: pass effective_session_id so ZREM actually runs
+                                self._decrement_profile_connections(profile_id, effective_session_id)
                                 profile_decremented = True
                                 logger.info(f"[{client_id}] Profile counter decremented for profile {profile_id} in finally block")
 
-                            # Delayed cleanup: wait 1s for seeking clients to reconnect
+                            # Delayed cleanup: wait 3s for seeking clients to reconnect
                             # before closing the provider connection and Redis keys.
                             # cleanup() re-checks active_streams under lock, so a
                             # reconnecting client that increments active_streams in
                             # time will prevent Redis key deletion.
                             def delayed_cleanup():
-                                time.sleep(1)
+                                time.sleep(3)
                                 logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup in finally block")
                                 # No connection_manager — profile already decremented above
                                 redis_connection.cleanup(current_worker_id=self.worker_id)
@@ -1722,8 +1728,7 @@ class MultiWorkerVODConnectionManager:
                             continue
 
                         # Convert bytes keys/values to strings if needed
-                        if isinstance(list(connection_data.keys())[0], bytes):
-                            connection_data = {k: v for k, v in connection_data.items()}
+                        connection_data = _decode_redis_hash(connection_data)
 
                         # Check if content matches (using consolidated data)
                         stored_content_type = connection_data.get('content_obj_type', '')
@@ -1732,8 +1737,9 @@ class MultiWorkerVODConnectionManager:
                         if stored_content_type != content_type or stored_content_uuid != content_uuid:
                             continue
 
-                        # Extract session ID
-                        session_id = key.replace('vod_persistent_connection:', '')
+                        # Extract session ID (key may be bytes from Redis scan)
+                        key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                        session_id = key_str.replace('vod_persistent_connection:', '')
 
                         # Check if Redis-backed connection exists and has no active streams
                         redis_connection = RedisBackedVODConnection(session_id, self.redis_client)
