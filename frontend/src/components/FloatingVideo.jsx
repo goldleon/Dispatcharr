@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import Draggable from 'react-draggable';
 import useVideoStore from '../store/useVideoStore';
+import useAuthStore from '../store/auth';
 import mpegts from 'mpegts.js';
 import { CloseButton, Flex, Loader, Text, Box } from '@mantine/core';
 import {
@@ -117,6 +118,7 @@ export default function FloatingVideo() {
   const contentType = useVideoStore((s) => s.contentType);
   const metadata = useVideoStore((s) => s.metadata);
   const hideVideo = useVideoStore((s) => s.hideVideo);
+  const accessToken = useAuthStore((s) => s.accessToken);
 
   const videoRef = useRef(null);
   const playerRef = useRef(null);
@@ -133,7 +135,8 @@ export default function FloatingVideo() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState(null);
-  const [showOverlay, setShowOverlay] = useState(true);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const [showControls, setShowControls] = useState(false);
   const [videoSize, setVideoSize] = useState(() => {
     const prefs = getPlayerPrefs();
     const saved = prefs.size;
@@ -223,7 +226,8 @@ export default function FloatingVideo() {
 
     setIsLoading(true);
     setLoadError(null);
-    setShowOverlay(true); // Show overlay initially
+    setShowOverlay(false);
+    setShowControls(false);
 
     console.log('Initializing VOD player for:', streamUrl);
 
@@ -246,7 +250,8 @@ export default function FloatingVideo() {
         console.log('Auto-play prevented:', e);
         setLoadError('Auto-play was prevented. Click play to start.');
       });
-      // Start overlay timer when video is ready
+      // Show overlay briefly when video is ready, then auto-hide
+      setShowOverlay(true);
       startOverlayTimer();
     };
     const handleError = (e) => {
@@ -298,8 +303,7 @@ export default function FloatingVideo() {
 
     setIsLoading(true);
     setLoadError(null);
-
-    console.log('Initializing live stream player for:', streamUrl);
+    setShowControls(false);
 
     try {
       if (!mpegts.getFeatureList().mseLivePlayback) {
@@ -310,20 +314,34 @@ export default function FloatingVideo() {
         return;
       }
 
-      const player = mpegts.createPlayer({
-        type: 'mpegts',
-        url: streamUrl,
-        isLive: true,
-        enableWorker: true,
-        enableStashBuffer: false,
-        liveBufferLatencyChasing: true,
-        liveSync: true,
-        cors: true,
-        autoCleanupSourceBuffer: true,
-        autoCleanupMaxBackwardDuration: 10,
-        autoCleanupMinBackwardDuration: 5,
-        reuseRedirectedURL: true,
-      });
+      // mpegts.js workers run in WorkerGlobalScope where relative URLs are
+      // not resolved against the page origin. Always pass an absolute URL.
+      const absoluteStreamUrl =
+        streamUrl.startsWith('/') && typeof window !== 'undefined'
+          ? `${window.location.origin}${streamUrl}`
+          : streamUrl;
+
+      const player = mpegts.createPlayer(
+        {
+          type: 'mpegts',
+          url: absoluteStreamUrl,
+          isLive: true,
+          cors: true,
+        },
+        {
+          enableWorker: true,
+          enableStashBuffer: false,
+          liveBufferLatencyChasing: false,
+          liveSync: false,
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 120,
+          autoCleanupMinBackwardDuration: 60,
+          reuseRedirectedURL: true,
+          headers: accessToken
+            ? { Authorization: `Bearer ${accessToken}` }
+            : undefined,
+        }
+      );
 
       player.attachMediaElement(videoRef.current);
 
@@ -834,6 +852,7 @@ export default function FloatingVideo() {
         <Box
           style={{ position: 'relative' }}
           onMouseEnter={() => {
+            setShowControls(true);
             if (contentType === 'vod' && !isLoading) {
               setShowOverlay(true);
               if (overlayTimeoutRef.current) {
@@ -850,7 +869,7 @@ export default function FloatingVideo() {
           {/* Enhanced video element with better controls for VOD */}
           <video
             ref={videoRef}
-            controls
+            controls={showControls}
             className="floating-video-no-drag"
             style={{
               width: '100%',

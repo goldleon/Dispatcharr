@@ -3,7 +3,7 @@ services:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
-    image: ghcr.io/dispatcharr/dispatcharr:latest
+    image: dispatcharr:latest
     restart: unless-stopped
     container_name: dispatcharr
     ports:

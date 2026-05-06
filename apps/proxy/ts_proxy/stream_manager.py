@@ -109,7 +109,7 @@ class StreamManager:
                     # Try to get stream_id specifically
                     stream_id_bytes = buffer.redis_client.hget(metadata_key, "stream_id")
                     if stream_id_bytes:
-                        self.current_stream_id = int(stream_id_bytes.decode('utf-8'))
+                        self.current_stream_id = int(stream_id_bytes)
                         self.tried_stream_ids.add(self.current_stream_id)
                         logger.info(f"Loaded stream ID {self.current_stream_id} from Redis for channel {buffer.channel_id}")
                     else:
@@ -194,6 +194,12 @@ class StreamManager:
 
         # Add HTTP reader thread property
         self.http_reader = None
+
+        # Output bitrate smoothing / throttled DB persistence
+        self._smoothed_output_bitrate = None
+        self._last_bitrate_db_save_time = 0
+        self._bitrate_db_save_interval = 30  # seconds between DB writes
+        self._bitrate_warmup_samples = 10   # discard first N samples while EMA stabilizes (~5s)
 
     def _create_session(self):
         """Create and configure requests session with optimal settings"""
@@ -474,7 +480,7 @@ class StreamManager:
                     is_owner = (
                         current_owner
                         and self.worker_id
-                        and current_owner.decode('utf-8') == self.worker_id
+                        and current_owner == self.worker_id
                     )
                     no_owner = current_owner is None
 
@@ -484,7 +490,7 @@ class StreamManager:
                             metadata_key, ChannelMetadataField.STATE
                         )
                         current_state = (
-                            current_state_bytes.decode('utf-8')
+                            current_state_bytes
                             if current_state_bytes else None
                         )
                         should_update = current_state in ChannelState.PRE_ACTIVE
@@ -807,13 +813,25 @@ class StreamManager:
             if any(x is not None for x in [ffmpeg_speed, ffmpeg_fps, actual_fps, ffmpeg_output_bitrate]):
                 self._update_ffmpeg_stats_in_redis(ffmpeg_speed, ffmpeg_fps, actual_fps, ffmpeg_output_bitrate)
 
-                # Also save ffmpeg_output_bitrate to database if we have stream_id
+                # Update local EMA and periodically flush to database
                 if ffmpeg_output_bitrate is not None and self.current_stream_id:
-                    from .services.channel_service import ChannelService
-                    ChannelService._update_stream_stats_in_db(
-                        self.current_stream_id,
-                        ffmpeg_output_bitrate=ffmpeg_output_bitrate
-                    )
+                    if self._bitrate_warmup_samples > 0:
+                        # Discard early samples from the EMA
+                        self._bitrate_warmup_samples -= 1
+                    else:
+                        if self._smoothed_output_bitrate is None:
+                            self._smoothed_output_bitrate = ffmpeg_output_bitrate
+                        else:
+                            self._smoothed_output_bitrate = 0.9 * self._smoothed_output_bitrate + 0.1 * ffmpeg_output_bitrate
+
+                        now = time.time()
+                        if now - self._last_bitrate_db_save_time >= self._bitrate_db_save_interval:
+                            from .services.channel_service import ChannelService
+                            ChannelService._update_stream_stats_in_db(
+                                self.current_stream_id,
+                                ffmpeg_output_bitrate=round(self._smoothed_output_bitrate, 1)
+                            )
+                            self._last_bitrate_db_save_time = now
 
             # Fix the f-string formatting
             actual_fps_str = f"{actual_fps:.1f}" if actual_fps is not None else "N/A"
@@ -1084,6 +1102,20 @@ class StreamManager:
         # Set running to false to ensure thread exits
         self.running = False
 
+        # Flush the final bitrate to DB on stop only if warmup completed and we have
+        # a meaningful EMA. Short previews / channel hops that die during warmup do NOT
+        # write anything, preserving any previously correct value in the database.
+        if self._smoothed_output_bitrate is not None and self.current_stream_id:
+            final_bitrate = self._smoothed_output_bitrate
+            try:
+                from .services.channel_service import ChannelService
+                ChannelService._update_stream_stats_in_db(
+                    self.current_stream_id,
+                    ffmpeg_output_bitrate=round(final_bitrate, 1)
+                )
+            except Exception as e:
+                logger.debug(f"Error flushing final bitrate to DB for channel {self.channel_id}: {e}")
+
     def update_url(self, new_url, stream_id=None, m3u_profile_id=None):
         """Update stream URL and reconnect with proper cleanup for both HTTP and transcode sessions"""
         if new_url == self.url:
@@ -1140,6 +1172,11 @@ class StreamManager:
             self.url = new_url
             self.connected = False
 
+            # Reset bitrate EMA on every URL change so stale data never carries over
+            self._smoothed_output_bitrate = None
+            self._last_bitrate_db_save_time = 0
+            self._bitrate_warmup_samples = 10
+
             # Update stream ID if provided
             if stream_id:
                 old_stream_id = self.current_stream_id
@@ -1175,7 +1212,7 @@ class StreamManager:
             logger.error(f"Error during URL update for channel {self.channel_id}: {e}", exc_info=True)
             return False
         finally:
-            # CRITICAL FIX: Always reset the URL switching flag when done, whether successful or not
+            # Always reset the URL switching flag when done, whether successful or not
             self.url_switching = False
             logger.info(f"Stream switch completed for channel {self.channel_id}")
 
@@ -1529,9 +1566,9 @@ class StreamManager:
                     current_state = None
                     try:
                         metadata = redis_client.hgetall(metadata_key)
-                        state_field = ChannelMetadataField.STATE.encode('utf-8')
+                        state_field = ChannelMetadataField.STATE
                         if metadata and state_field in metadata:
-                            current_state = metadata[state_field].decode('utf-8')
+                            current_state = metadata[state_field]
                     except Exception as e:
                         logger.error(f"Error checking current state: {e}")
 
@@ -1689,7 +1726,7 @@ class StreamManager:
                 new_user_agent = stream_info['user_agent']
                 new_transcode = stream_info['transcode']
 
-                # CRITICAL FIX: Check if the new URL is the same as current URL
+                # Check if the new URL is the same as current URL
                 # This can happen when current_stream_id is None and we accidentally select the same stream
                 if new_url == self.url:
                     logger.warning(f"Stream ID {stream_id} generates the same URL as current stream ({new_url}). "
@@ -1698,7 +1735,7 @@ class StreamManager:
 
                 logger.info(f"Switching from URL {self.url} to {new_url} for channel {self.channel_id}")
 
-                # IMPORTANT: Just update the URL, don't stop the channel or release resources
+                # Just update the URL, don't stop the channel or release resources
                 switch_result = self.update_url(new_url, stream_id, profile_id)
                 if not switch_result:
                     logger.error(f"Failed to update URL for stream ID {stream_id} for channel {self.channel_id}")

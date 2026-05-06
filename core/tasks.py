@@ -14,7 +14,7 @@ from apps.m3u.tasks import refresh_single_m3u_account
 from apps.epg.tasks import refresh_epg_data
 from apps.proxy.tasks import reconcile_profile_connections
 from .models import CoreSettings
-from apps.channels.models import Stream, ChannelStream
+from apps.channels.models import ChannelStream
 from django.db import transaction
 
 logger = logging.getLogger(__name__)
@@ -406,7 +406,7 @@ def fetch_channel_stats():
         while True:
             cursor, keys = redis_client.scan(cursor, match=channel_pattern)
             for key in keys:
-                channel_id_match = re.search(r"ts_proxy:channel:(.*):metadata", key.decode('utf-8'))
+                channel_id_match = re.search(r"ts_proxy:channel:(.*):metadata", key)
                 if channel_id_match:
                     ch_id = channel_id_match.group(1)
                     channel_info = ChannelStatus.get_basic_channel_info(ch_id)
@@ -753,20 +753,6 @@ def _determine_stream_to_keep(stream_a, stream_b):
     if stream_a.id < stream_b.id:
         return (stream_a, stream_b)
     return (stream_b, stream_a)
-
-
-@shared_task
-def cleanup_vod_persistent_connections():
-    """Clean up stale VOD persistent connections"""
-    try:
-        from apps.proxy.vod_proxy.connection_manager import VODConnectionManager
-
-        # Clean up connections older than 30 minutes
-        VODConnectionManager.cleanup_stale_persistent_connections(max_age_seconds=1800)
-        logger.info("VOD persistent connection cleanup completed")
-
-    except Exception as e:
-        logger.error(f"Error during VOD persistent connection cleanup: {e}")
 
 
 @shared_task
