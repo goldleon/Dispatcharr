@@ -400,14 +400,22 @@ class StreamGenerator:
             logger.info(f"[{self.client_id}] Detected channel stop signal, terminating stream")
             return False
 
-        # Channel state in metadata
+        # Channel state and owner check
         metadata_key = RedisKeys.channel_metadata(self.channel_id)
         metadata = proxy_server.redis_client.hgetall(metadata_key)
-        if metadata and 'state' in metadata:
-            state = metadata['state']
-            if state in ['error', 'stopped', 'stopping']:
-                logger.info(f"[{self.client_id}] Channel in {state} state, terminating stream")
-                return False
+        if metadata:
+            if 'state' in metadata:
+                state = metadata['state']
+                if state in ['error', 'stopped', 'stopping']:
+                    logger.info(f"[{self.client_id}] Channel in {state} state, terminating stream")
+                    return False
+
+            if 'owner' in metadata:
+                owner = metadata['owner']
+                alive_key = f"ts_proxy:workers:{owner}:alive"
+                if not proxy_server.redis_client.exists(alive_key):
+                    logger.warning(f"[{self.client_id}] Detected dead owner {owner}, terminating stream to trigger client retry/takeover")
+                    return False
 
         # Client stop check
         client_stop_key = RedisKeys.client_stop(self.channel_id, self.client_id)
@@ -548,10 +556,23 @@ class StreamGenerator:
 
                 logger.warning(f"[{self.client_id}] No data for {total_timeout}s and stream unhealthy, disconnecting")
                 return True
-            elif not self.is_owner_worker and self.consecutive_empty > 100:
-                # Non-owner worker without data for too long
-                logger.warning(f"[{self.client_id}] Non-owner worker with no data for {total_timeout}s, disconnecting")
-                return True
+            elif not self.is_owner_worker:
+                # Check if the owner is still alive if we've been empty for a while
+                if self.consecutive_empty > 20:
+                    proxy_server = self.proxy_server or ProxyServer.get_instance()
+                    if proxy_server and proxy_server.redis_client:
+                        metadata_key = RedisKeys.channel_metadata(self.channel_id)
+                        owner = proxy_server.redis_client.hget(metadata_key, 'owner')
+                        if owner:
+                            alive_key = f"ts_proxy:workers:{owner}:alive"
+                            if not proxy_server.redis_client.exists(alive_key):
+                                logger.warning(f"[{self.client_id}] Channel owner {owner} is dead, disconnecting client to force retry")
+                                return True
+
+                if self.consecutive_empty > 100:
+                    # Non-owner worker without data for too long
+                    logger.warning(f"[{self.client_id}] Non-owner worker with no data for {total_timeout}s, disconnecting")
+                    return True
         return False
 
     def _cleanup(self):

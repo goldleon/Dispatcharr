@@ -1436,7 +1436,16 @@ class ProxyServer:
                     client_count = self.redis_client.scard(client_set_key) or 0
 
                     # If no owner and no clients, clean it up
-                    if not owner_alive and client_count == 0:
+                    if owner_alive and state in ['error', 'stopped']:
+                        # Owner is alive but channel is in terminal state — check if it's been
+                        # in this state too long and should be cleaned up from Redis registry.
+                        state_changed = float(metadata.get('state_changed_at', 0))
+                        if state_changed > 0 and (time.time() - state_changed) > 300:
+                            logger.info(f"Channel {channel_id} in terminal state {state} for >5m - forced cleanup")
+                            self._clean_redis_keys(channel_id)
+                            continue
+
+                    if not owner_alive and client_count > 0:
                         state = metadata.get('state', 'unknown')
                         logger.warning(f"Found orphaned metadata for channel {channel_id} (state: {state}, owner: {owner}, clients: {client_count}) - cleaning up")
 
@@ -1470,8 +1479,11 @@ class ProxyServer:
                             logger.warning(
                                 f"Orphaned channel {channel_id} still has "
                                 f"{real_count} live client(s) after ghost removal "
-                                f"- may need ownership takeover"
+                                f"- triggering automated ownership takeover"
                             )
+                            # Attempt takeover: this will initialize the channel on THIS worker
+                            # if it successfully acquires the ownership lock.
+                            gevent.spawn(self.initialize_channel, None, channel_id)
 
                 except Exception as e:
                     logger.error(f"Error processing metadata key {key}: {e}", exc_info=True)
