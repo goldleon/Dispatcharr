@@ -145,7 +145,7 @@ def validate_icon_url_fast(icon_url, max_length=None):
         # Get max_length dynamically from the model field
         max_length = EPGData._meta.get_field('icon_url').max_length
 
-    if icon_url and len(icon_url) > max_length:
+    if icon_url and max_length is not None and len(icon_url) > max_length:
         logger.warning(f"Icon URL too long ({len(icon_url)} > {max_length}), skipping: {icon_url[:100]}...")
         return None
     return icon_url
@@ -1088,7 +1088,7 @@ def parse_channels_only(source):
                         if not display_name:
                             display_name = tvg_id
 
-                        if display_name and len(display_name) > name_max_length:
+                        if display_name and name_max_length is not None and len(display_name) > name_max_length:
                             logger.warning(f"EPG display name too long ({len(display_name)} > {name_max_length}), truncating: {display_name[:80]}...")
                             display_name = display_name[:name_max_length]
 
@@ -1172,8 +1172,8 @@ def parse_channels_only(source):
                             logger.info(f"[parse_channels_only] Memory after clearing cache: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
                     # Send progress updates
-                    if processed_channels % 100 == 0 or processed_channels == total_channels:
-                        progress = 25 + int((processed_channels / total_channels) * 65) if total_channels > 0 else 90
+                    if total_channels is not None and total_channels > 0 and (processed_channels % 100 == 0 or processed_channels == total_channels):
+                        progress = 25 + int((processed_channels / total_channels) * 65)
                         send_epg_update(
                             source.id,
                             "parsing_channels",
@@ -1181,7 +1181,7 @@ def parse_channels_only(source):
                             processed=processed_channels,
                             total=total_channels
                         )
-                    if processed_channels > total_channels:
+                    if total_channels is not None and processed_channels > total_channels:
                         logger.debug(f"[parse_channels_only] Processed channel {tvg_id} - processed {processed_channels - total_channels} additional channels")
                     else:
                         logger.debug(f"[parse_channels_only] Processed channel {tvg_id} - processed {processed_channels}/{total_channels}")
