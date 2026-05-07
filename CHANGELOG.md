@@ -5,10 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
 
-<<<<<<< HEAD
-=======
 ## [0.24.0] - 2026-05-03
 
 ### Security
@@ -107,8 +104,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Dead M3U helper methods**: deleted `M3UAccount.deactivate_streams`, `M3UAccount.reactivate_streams`, and `M3UFilter.filter_streams`. None had any callers anywhere in the codebase. New code that needs to flip `is_active` on every stream of an account should use `self.streams.update(is_active=...)` rather than reintroducing a per-row `.save()` loop.
 - **HDHomeRun SSDP advertiser**. The `apps/hdhr/ssdp.py` module and the `start_ssdp()` call in `apps.hdhr.apps.HdhrConfig.ready()` have been removed. The implementation advertised a `urn:schemas-upnp-org:device:MediaServer:1` UPnP MediaServer device on `udp/1900`, but Dispatcharr does not implement the UPnP MediaServer Content Directory Service that such an advertisement promises, and the `LOCATION`-targeted `/hdhr/device.xml` returns HDHomeRun-flavored XML rather than the UPnP descriptor a generic UPnP browser expects. None of the major HDHomeRun clients (Plex, Emby, Jellyfin, Channels DVR, Kodi) use SSDP for tuner discovery, they use SiliconDust's native UDP broadcast on `udp/65001`, which Dispatcharr does not currently implement. The advertiser ran a listener thread, a broadcaster thread, a bound multicast socket, and emitted a `NOTIFY` broadcast every 30 seconds for no consumer. Tuners can still be added in any HDHomeRun-aware client by entering the Dispatcharr URL manually (e.g. `http://<host>:9191/`).
->>>>>>> v0.24.0
-
 ## [0.23.0] - 2026-04-17
 
 ### Security

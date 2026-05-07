@@ -27,7 +27,7 @@ dependencies = [
     "regex",
     "tzlocal",
     "pytz",
-    "torch==2.11.0+cpu",
+    "torch>=2.4.0",
     "sentence-transformers==5.4.1",
     "channels",
     "channels-redis==4.3.0",
@@ -49,7 +49,9 @@ name = "pytorch-cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'darwin'" },
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["dispatcharr", "apps", "core"]
