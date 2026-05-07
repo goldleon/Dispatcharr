@@ -1060,7 +1060,7 @@ def parse_channels_only(source):
 
             # Change iterparse to look for both channel and programme elements
             logger.debug(f"Creating iterparse context for channels and programmes")
-            channel_parser = etree.iterparse(source_file, events=('end',), tag=('channel', 'programme'), remove_blank_text=True, recover=True)
+            channel_parser = etree.iterparse(source_file, events=('end',), tag=('channel', 'programme'), remove_blank_text=True, recover=True, resolve_entities=False)
             if process:
                 logger.debug(f"[parse_channels_only] Memory after creating iterparse: {process.memory_info().rss / 1024 / 1024:.2f} MB")
 
@@ -1493,7 +1493,7 @@ def parse_programs_for_tvg_id(epg_id):
             source_file = _open_xmltv_file(file_path)
 
             # Stream parse the file using lxml's iterparse
-            program_parser = etree.iterparse(source_file, events=('end',), tag='programme',  remove_blank_text=True, recover=True)
+            program_parser = etree.iterparse(source_file, events=('end',), tag='programme',  remove_blank_text=True, recover=True, resolve_entities=False)
 
             for _, elem in program_parser:
                 if elem.get('channel') == epg.tvg_id:
@@ -1778,7 +1778,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
             source_file = _open_xmltv_file(file_path)
 
             # Stream parse the file using lxml's iterparse
-            program_parser = etree.iterparse(source_file, events=('end',), tag='programme', remove_blank_text=True, recover=True)
+            program_parser = etree.iterparse(source_file, events=('end',), tag='programme', remove_blank_text=True, recover=True, resolve_entities=False)
 
             for _, elem in program_parser:
                 channel_id = elem.get('channel')
