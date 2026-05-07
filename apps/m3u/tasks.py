@@ -1111,6 +1111,8 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     streams_to_update = []
     stream_hashes = {}
 
+    name_max_length = Stream._meta.get_field('name').max_length
+
     logger.debug(f"Processing batch of {len(batch)} for M3U account {account_id}")
     if compiled_filters:
         logger.debug(f"Using compiled filters: {[f[1].regex_pattern for f in compiled_filters]}")
@@ -1122,6 +1124,11 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
             if url and len(url) > 4096:
                 logger.warning(f"Skipping stream '{name}': URL too long ({len(url)} characters, max 4096)")
                 continue
+
+            # Truncate name if it exceeds the model field limit
+            if name and len(name) > name_max_length:
+                logger.warning(f"Stream name too long ({len(name)} > {name_max_length}), truncating: {name[:80]}...")
+                name = name[:name_max_length]
 
             tvg_id, tvg_logo = get_case_insensitive_attr(
                 stream_info["attributes"], "tvg-id", ""
@@ -2858,16 +2865,17 @@ def send_m3u_update(account_id, action, progress, **kwargs):
         "action": action,
     }
 
-    # Add the status and message if not already in kwargs
-    try:
-        account = M3UAccount.objects.get(id=account_id)
-        if account:
+    # Only fetch the account when we actually need to fill in missing fields.
+    # Many callers in tight loops already pass status/message; skip the DB hit then.
+    if "status" not in kwargs or "message" not in kwargs:
+        try:
+            account = M3UAccount.objects.only("status", "last_message").get(id=account_id)
             if "status" not in kwargs:
                 data["status"] = account.status
             if "message" not in kwargs and account.last_message:
                 data["message"] = account.last_message
-    except:
-        pass  # If account can't be retrieved, continue without these fields
+        except Exception:
+            pass
 
     # Add the additional key-value pairs from kwargs
     data.update(kwargs)

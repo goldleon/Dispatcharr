@@ -138,6 +138,7 @@ class EPGData(models.Model):
     # and a name (which might simply be the tvg_id if no real channel exists).
     tvg_id = models.TextField(null=True, blank=True, db_index=True)
     name = models.TextField()
+
     icon_url = models.URLField(max_length=500, null=True, blank=True)
     epg_source = models.ForeignKey(
         EPGSource,

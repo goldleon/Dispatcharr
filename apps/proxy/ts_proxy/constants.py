@@ -50,6 +50,8 @@ class ChannelMetadataField:
     STATE = "state"
     OWNER = "owner"
     STREAM_ID = "stream_id"
+    CHANNEL_NAME = "channel_name"
+    STREAM_NAME = "stream_name"
 
     # Profile fields
     STREAM_PROFILE = "stream_profile"

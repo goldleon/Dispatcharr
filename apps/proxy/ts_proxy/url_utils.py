@@ -154,8 +154,11 @@ def transform_url(input_url: str, search_pattern: str, replace_pattern: str) -> 
         logger.debug(f"  safe replace: {safe_replace_pattern}")
 
         # Apply the transformation (regex module accepts JS-style (?<name>...) natively)
-        stream_url = regex.sub(search_pattern, safe_replace_pattern, input_url)
-        logger.info(f"Generated stream url: {stream_url}")
+        stream_url, match_count = regex.subn(search_pattern, safe_replace_pattern, input_url)
+        if match_count == 0:
+            logger.warning(f"URL pattern '{search_pattern}' did not match, falling back to original URL: {input_url}")
+        else:
+            logger.info(f"Generated stream url: {stream_url}")
 
         return stream_url
     except Exception as e:
@@ -272,7 +275,8 @@ def get_stream_info_for_switch(channel_id: str, target_stream_id: Optional[int] 
             'transcode': transcode,
             'stream_profile': profile_value,
             'stream_id': stream_id,
-            'm3u_profile_id': m3u_profile_id
+            'm3u_profile_id': m3u_profile_id,
+            'stream_name': stream.name,
         }
     except Exception as e:
         logger.error(f"Error getting stream info for switch: {e}", exc_info=True)

@@ -48,6 +48,12 @@ class StreamManager:
     def __init__(self, channel_id, url, buffer, user_agent=None, transcode=False, stream_id=None, worker_id=None, channel_name=None):
         # Basic properties
         self.channel_id = channel_id
+        # Cache channel name once to avoid repeated DB queries in hot retry/reconnect loops
+        try:
+            _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+            self.channel_name = _name if _name else str(channel_id)
+        except Exception:
+            self.channel_name = str(channel_id)
         self.url = url
         self.buffer = buffer
         self.running = True
