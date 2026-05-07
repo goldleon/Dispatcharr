@@ -624,56 +624,47 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
         # Close the small range request - we don't need to keep this connection
         response.close()
 
-        # Store the total content length in Redis for the persistent connection to use
-        try:
-            import redis
-            from django.conf import settings
-            redis_host = getattr(settings, 'REDIS_HOST', 'localhost')
-            redis_port = int(getattr(settings, 'REDIS_PORT', 6379))
-            redis_db = int(getattr(settings, 'REDIS_DB', 0))
-            redis_password = getattr(settings, 'REDIS_PASSWORD', '')
-            redis_user = getattr(settings, 'REDIS_USER', '')
-            ssl_params = getattr(settings, 'REDIS_SSL_PARAMS', {})
-            r = redis.StrictRedis(
-                host=redis_host,
-                port=redis_port,
-                db=redis_db,
-                password=redis_password if redis_password else None,
-                username=redis_user if redis_user else None,
-                decode_responses=True,
-                **ssl_params
-            )
-            content_length_key = f"vod_content_length:{session_id}"
-            r.set(content_length_key, total_size, ex=1800)  # Store for 30 minutes
-            logger.info(f"[VOD-HEAD] Stored total content length {total_size} for session {session_id}")
-        except Exception as e:
-            logger.error(f"[VOD-HEAD] Failed to store content length in Redis: {e}")
-
-        # Now create a persistent connection for the session (if one doesn't exist)
-        # This ensures the FUSE GET requests will reuse the same connection
-
+        # Store discovered metadata in the persistent connection state for GET requests to reuse
         connection_manager = MultiWorkerVODConnectionManager.get_instance()
-
-        logger.info(f"[VOD-HEAD] Pre-creating persistent connection for session: {session_id}")
-
-        # We don't actually stream content here, just ensure connection is ready
-        # The actual GET requests from FUSE will use the persistent connection
+        from apps.proxy.vod_proxy.multi_worker_connection_manager import RedisBackedVODConnection
+        
+        # Initialize the connection if it doesn't exist yet
+        redis_connection = RedisBackedVODConnection(session_id)
+        redis_connection.create_connection(
+            stream_url=final_stream_url,
+            headers=probe_headers,
+            m3u_profile_id=m3u_profile.id,
+            content_obj_type=content_type,
+            content_uuid=str(content_obj.uuid),
+            content_name=content_obj.name,
+            client_ip=client_ip,
+            client_user_agent=client_user_agent,
+            ssl_verify=head_ssl_verify
+        )
 
         # Use the total_size we extracted from the range response
         provider_content_type = response.headers.get('Content-Type')
-
         if provider_content_type:
             content_type_header = provider_content_type
             logger.info(f"[VOD-HEAD] Using provider Content-Type: {content_type_header}")
         else:
             # Provider didn't send Content-Type, infer from URL
             inferred_content_type = infer_content_type_from_url(final_stream_url)
-            if inferred_content_type:
-                content_type_header = inferred_content_type
-                logger.info(f"[VOD-HEAD] Provider missing Content-Type, inferred from URL: {content_type_header}")
-            else:
-                content_type_header = 'video/mp4'
-                logger.info(f"[VOD-HEAD] No Content-Type from provider and could not infer from URL, using default: {content_type_header}")
+            content_type_header = inferred_content_type or 'video/mp4'
+            logger.info(f"[VOD-HEAD] Provider missing Content-Type, using: {content_type_header}")
+
+        # Update the connection state metadata so GET requests see it immediately
+        redis_connection.update_metadata(content_length=total_size, content_type=content_type_header)
+
+        # Also keep the dedicated cache key for 30m as a secondary fallback for the GET request's sync logic
+        try:
+            from core.utils import RedisClient
+            r = RedisClient.get_client()
+            if r:
+                content_length_key = f"vod_content_length:{session_id}"
+                r.set(content_length_key, total_size, ex=1800)
+        except Exception as cache_e:
+            logger.warning(f"[VOD-HEAD] Failed to update secondary cache: {cache_e}")
 
         logger.info(f"[VOD-HEAD] Provider response - Total Size: {total_size}, Type: {content_type_header}")
 

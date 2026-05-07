@@ -349,6 +349,28 @@ class RedisBackedVODConnection:
         finally:
             self._release_lock()
 
+    def update_metadata(self, content_length=None, content_type=None):
+        """Update connection metadata in Redis (typically called from HEAD requests)"""
+        if not self._acquire_lock():
+            return False
+        try:
+            state = self._get_connection_state()
+            if state:
+                updated = False
+                if content_length and str(content_length) != str(state.content_length):
+                    state.content_length = str(content_length)
+                    updated = True
+                if content_type and content_type != state.content_type:
+                    state.content_type = content_type
+                    updated = True
+                
+                if updated:
+                    return self._save_connection_state(state)
+                return True
+            return False
+        finally:
+            self._release_lock()
+
     def get_stream(self, range_header: str = None):
         """Get stream with optional range header - works across workers"""
         # Get connection state from Redis
@@ -383,6 +405,35 @@ class RedisBackedVODConnection:
             # Use final URL if available, otherwise original URL
             target_url = state.final_url if state.final_url else state.stream_url
             allow_redirects = not state.final_url  # Only follow redirects if we don't have final URL
+
+            # SYNC: Check if head_vod already stored the content length for this session
+            if not state.content_length and self.redis_client:
+                cached_size = self.redis_client.get(f"vod_content_length:{self.session_id}")
+                if cached_size:
+                    size_str = cached_size.decode('utf-8') if isinstance(cached_size, bytes) else str(cached_size)
+                    state.content_length = size_str
+                    logger.info(f"[{self.session_id}] Restored content length from head_vod cache: {state.content_length}")
+
+            # PROACTIVE PROBE: If range requested but size unknown, probe first
+            if range_header and not state.content_length:
+                logger.info(f"[{self.session_id}] Range requested but size unknown - performing proactive probe")
+                probe_headers = build_upstream_headers(
+                    base_headers={'Range': 'bytes=0-1'},
+                    user_agent=state.client_user_agent
+                )
+                try:
+                    probe_resp = self.local_session.get(
+                        target_url, headers=probe_headers, timeout=5,
+                        allow_redirects=allow_redirects, verify=state.ssl_verify, stream=True
+                    )
+                    if probe_resp.status_code == 206:
+                        cr = probe_resp.headers.get('content-range')
+                        if cr and '/' in cr:
+                            state.content_length = cr.split('/')[-1]
+                            logger.info(f"[{self.session_id}] Proactive probe successful: total_size={state.content_length}")
+                    probe_resp.close()
+                except Exception as probe_e:
+                    logger.warning(f"[{self.session_id}] Proactive probe failed: {probe_e}")
 
             logger.info(f"[{self.session_id}] Making request #{state.request_count} to {'final' if state.final_url else 'original'} URL")
 
@@ -433,12 +484,14 @@ class RedisBackedVODConnection:
                                 state.content_length = total_size
                                 logger.debug(f"[{self.session_id}] Got full file size from Content-Range: {total_size}")
                             else:
-                                # Fallback to Content-Length for partial size
-                                state.content_length = response.headers.get('content-length')
+                                # Fallback to Content-Length ONLY if status is 200
+                                if response.status_code == 200:
+                                    state.content_length = response.headers.get('content-length')
                         except Exception as e:
                             logger.warning(f"[{self.session_id}] Error parsing Content-Range: {e}")
-                            state.content_length = response.headers.get('content-length')
-                    else:
+                            if response.status_code == 200:
+                                state.content_length = response.headers.get('content-length')
+                    elif response.status_code == 200:
                         # No Content-Range, use Content-Length (for non-range requests)
                         state.content_length = response.headers.get('content-length')
 
@@ -1220,12 +1273,43 @@ class MultiWorkerVODConnectionManager:
 
                     bytes_sent = 0
                     chunk_count = 0
+                    skip_bytes = 0
+                    total_skipped = 0
+
+                    # Check if provider ignored the Range header (Status 200 instead of 206)
+                    if upstream_response.status_code == 200 and range_header:
+                        try:
+                            if 'bytes=' in range_header:
+                                start_byte_str = range_header.replace('bytes=', '').split('-')[0]
+                                if start_byte_str:
+                                    skip_bytes = int(start_byte_str)
+                                    if skip_bytes > 0:
+                                        logger.warning(f"[{client_id}] Provider ignored Range header (Status 200). Skipping {skip_bytes:,} bytes manually.")
+                        except Exception as skip_e:
+                            logger.error(f"[{client_id}] Error calculating manual skip: {skip_e}")
 
                     # Get the stop signal key for this client
                     stop_key = get_vod_client_stop_key(client_id)
 
-                    for chunk in upstream_response.iter_content(chunk_size=8192):
+                    # Use larger chunks during skip phase for better performance
+                    current_chunk_size = 128 * 1024 if skip_bytes > 0 else 8192
+                    
+                    for chunk in upstream_response.iter_content(chunk_size=current_chunk_size):
                         if chunk:
+                            # Handle manual skipping if needed
+                            if skip_bytes > 0 and total_skipped < skip_bytes:
+                                remaining_to_skip = skip_bytes - total_skipped
+                                if len(chunk) <= remaining_to_skip:
+                                    total_skipped += len(chunk)
+                                    continue
+                                else:
+                                    # Partially skip this chunk
+                                    chunk = chunk[remaining_to_skip:]
+                                    total_skipped = skip_bytes
+                                    logger.info(f"[{client_id}] Manual skip completed. Starting delivery.")
+                                    # Switch back to normal chunk size for delivery
+                                    current_chunk_size = 8192
+
                             yield chunk
                             bytes_sent += len(chunk)
                             chunk_count += 1
