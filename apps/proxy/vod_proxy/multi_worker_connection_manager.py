@@ -1448,6 +1448,51 @@ class MultiWorkerVODConnectionManager:
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Resume completed after {resume_attempt} attempt(s): {bytes_sent:,} total bytes sent")
                             resume_attempted = True
                             break
+                        except GeneratorExit:
+                            # Client disconnected while we were mid-resume.
+                            # The outer except GeneratorExit: will NOT be reached because we are
+                            # inside a sibling except-clause (ChunkedEncodingError). We must
+                            # perform cleanup here explicitly, then re-raise to terminate the generator.
+                            logger.info(
+                                f"[{client_id}] Worker {self.worker_id} - Client disconnected "
+                                f"during resume attempt {resume_attempt}"
+                            )
+                            if not stream_decremented:
+                                stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                            else:
+                                has_remaining = redis_connection.has_active_streams()
+
+                            if not has_remaining and not profile_decremented:
+                                state = redis_connection._get_connection_state()
+                                profile_id = state.m3u_profile_id if state else m3u_profile.id
+                                if profile_id:
+                                    self._decrement_profile_connections(profile_id, effective_session_id)
+                                    profile_decremented = True
+                                    logger.info(
+                                        f"[{client_id}] Profile session {effective_session_id} "
+                                        f"removed on client disconnect during resume"
+                                    )
+
+                                def delayed_cleanup():
+                                    time.sleep(3)
+                                    if not redis_connection.has_active_streams():
+                                        self._send_vod_event(
+                                            'vod_stopped', client_id, content_name,
+                                            content_uuid, client_ip,
+                                            str(user.id) if user else '0',
+                                            user.username if user else None
+                                        )
+                                    logger.info(
+                                        f"[{client_id}] Worker {self.worker_id} - "
+                                        f"Smart cleanup after disconnect-during-resume"
+                                    )
+                                    redis_connection.cleanup(current_worker_id=self.worker_id)
+
+                                cleanup_thread = threading.Thread(target=delayed_cleanup)
+                                cleanup_thread.daemon = True
+                                cleanup_thread.start()
+
+                            raise  # CRITICAL: re-raise GeneratorExit to terminate the generator properly
                         except requests.exceptions.ChunkedEncodingError as retry_e:
                             logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
                             time.sleep(0.5 * resume_attempt)  # brief back-off before next retry

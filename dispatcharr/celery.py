@@ -60,14 +60,15 @@ app.conf.task_routes = {
 @task_postrun.connect  # Use the imported signal
 def cleanup_task_memory(**kwargs):
     """Clean up memory and database connections after each task completes"""
-    from django.db import connection
+    from django.db import connections, close_old_connections
 
     # Get task name from kwargs
     task_name = kwargs.get('task').name if kwargs.get('task') else ''
 
-    # Close database connection for this Celery worker process
+    # Close database connections for this Celery worker process
     try:
-        connection.close()
+        close_old_connections()
+        connections.close_all()
     except Exception:
         pass
 

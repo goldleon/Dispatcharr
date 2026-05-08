@@ -24,6 +24,9 @@ services:
       # Negative values require cap_add: SYS_NICE (uncomment below)
       #- UWSGI_NICE_LEVEL=-5   # uWSGI/FFmpeg/Streaming (default: 0, recommended: -5 for high priority)
       #- CELERY_NICE_LEVEL=5   # Celery/EPG/Background tasks (default: 5, low priority)
+      # Database Connection Tuning (Optional)
+      #- POSTGRES_MAX_CONNECTIONS=200 # Max Postgres connections (default: 200)
+      #- DATABASE_CONN_MAX_AGE=60     # Django connection reuse time in seconds (default: 60)
     #
     # Uncomment to enable high priority for streaming (required if UWSGI_NICE_LEVEL < 0)
     #cap_add:

@@ -55,6 +55,7 @@ class ChannelMetadataField:
 
     # Profile fields
     STREAM_PROFILE = "stream_profile"
+    TRANSCODE = "transcode"
     M3U_PROFILE = "m3u_profile"
 
     # Status and error fields

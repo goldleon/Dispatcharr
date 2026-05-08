@@ -41,6 +41,72 @@ HBAEOF
         echo "listen_addresses='*'" >> "${datadir}/postgresql.conf"
     }
 
+    # Tune postgresql.conf for performance and connection capacity.
+    # Set max_connections and shared_buffers based on environment.
+    configure_pg_performance() {
+        local datadir="$1"
+        local max_conn="${POSTGRES_MAX_CONNECTIONS:-200}"
+
+        echo "⚙️ Tuning PostgreSQL performance (max_connections=${max_conn})..."
+
+        # 1. Update max_connections
+        sed -Ei "/^[[:space:]]*max_connections[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "max_connections = ${max_conn}" >> "${datadir}/postgresql.conf"
+
+        # 2. Update performance tunables
+        # These are conservative defaults that can be overridden if needed.
+        # shared_buffers: ~25% of RAM is ideal, but for containerized AIO we stay safe.
+        sed -Ei "/^[[:space:]]*shared_buffers[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "shared_buffers = 128MB" >> "${datadir}/postgresql.conf"
+
+        # work_mem: Memory per-operation. Reduce slightly if connection count is very high.
+        sed -Ei "/^[[:space:]]*work_mem[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        if [ "$max_conn" -gt 500 ]; then
+            echo "work_mem = 2MB" >> "${datadir}/postgresql.conf"
+        else
+            echo "work_mem = 4MB" >> "${datadir}/postgresql.conf"
+        fi
+
+        # effective_cache_size: Hint for query planner.
+        sed -Ei "/^[[:space:]]*effective_cache_size[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "effective_cache_size = 512MB" >> "${datadir}/postgresql.conf"
+
+        chown "$PUID:$PGID" "${datadir}/postgresql.conf"
+    }
+
+    # Tune postgresql.conf for performance and connection capacity.
+    # Set max_connections and shared_buffers based on environment.
+    configure_pg_performance() {
+        local datadir="$1"
+        local max_conn="${POSTGRES_MAX_CONNECTIONS:-200}"
+
+        echo "⚙️ Tuning PostgreSQL performance (max_connections=${max_conn})..."
+
+        # 1. Update max_connections
+        sed -Ei "/^[[:space:]]*max_connections[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "max_connections = ${max_conn}" >> "${datadir}/postgresql.conf"
+
+        # 2. Update performance tunables
+        # These are conservative defaults that can be overridden if needed.
+        # shared_buffers: ~25% of RAM is ideal, but for containerized AIO we stay safe.
+        sed -Ei "/^[[:space:]]*shared_buffers[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "shared_buffers = 128MB" >> "${datadir}/postgresql.conf"
+
+        # work_mem: Memory per-operation. Reduce slightly if connection count is very high.
+        sed -Ei "/^[[:space:]]*work_mem[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        if [ "$max_conn" -gt 500 ]; then
+            echo "work_mem = 2MB" >> "${datadir}/postgresql.conf"
+        else
+            echo "work_mem = 4MB" >> "${datadir}/postgresql.conf"
+        fi
+
+        # effective_cache_size: Hint for query planner.
+        sed -Ei "/^[[:space:]]*effective_cache_size[[:space:]]*=/d" "${datadir}/postgresql.conf"
+        echo "effective_cache_size = 512MB" >> "${datadir}/postgresql.conf"
+
+        chown "$PUID:$PGID" "${datadir}/postgresql.conf"
+    }
+
     # Legacy migration: move data from /data root into $POSTGRES_DIR.
     # Safe to remove once all deployments have upgraded past this layout.
     if [ -e "/data/postgresql.conf" ]; then
@@ -149,6 +215,7 @@ HBAEOF
         # or initdb defaults. Eliminates the class of bugs where the OS user
         # name doesn't match any PG role under peer/ident auth.
         configure_pg_network "${POSTGRES_DIR}"
+        configure_pg_performance "${POSTGRES_DIR}"
     fi
 
     # Only run upgrade if current version is set and not the target
@@ -239,6 +306,7 @@ UPGEOF
 
         # Apply standard connection configuration to the upgraded data directory.
         configure_pg_network "${POSTGRES_DIR}"
+        configure_pg_performance "${POSTGRES_DIR}"
 
         # Record ownership sentinel for the newly upgraded data directory.
         write_ownership_sentinel
@@ -270,6 +338,7 @@ UPGEOF
 
         # Configure authentication and network access.
         configure_pg_network "${POSTGRES_DIR}"
+        configure_pg_performance "${POSTGRES_DIR}"
 
         # Record ownership sentinel for the freshly initialized data directory.
         write_ownership_sentinel

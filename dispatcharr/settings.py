@@ -111,9 +111,7 @@ XC_PROFILE_REFRESH_DELAY = float(os.environ.get('XC_PROFILE_REFRESH_DELAY', '2.5
 
 # Database optimization settings
 DATABASE_STATEMENT_TIMEOUT = 300  # Seconds before timing out long-running queries
-DATABASE_CONN_MAX_AGE = (
-    60  # Connection max age in seconds, helps with frequent reconnects
-)
+DATABASE_CONN_MAX_AGE = int(os.environ.get("DATABASE_CONN_MAX_AGE", 60))
 
 # Disable atomic requests for performance-sensitive views
 ATOMIC_REQUESTS = False
@@ -224,6 +222,7 @@ else:
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": int(os.environ.get("POSTGRES_PORT", 5432)),
             "CONN_MAX_AGE": DATABASE_CONN_MAX_AGE,
+            "CONN_HEALTH_CHECKS": True,
         }
     }
 

@@ -25,7 +25,7 @@ from .stream_manager import StreamManager
 from .stream_buffer import StreamBuffer
 from .client_manager import ClientManager
 from .redis_keys import RedisKeys
-from .constants import ChannelState, EventType, StreamType
+from .constants import ChannelState, EventType, StreamType, ChannelMetadataField
 from .config_helper import ConfigHelper
 from .utils import get_logger
 
@@ -565,7 +565,8 @@ class ProxyServer:
                 initial_metadata = {
                     "state": ChannelState.INITIALIZING,
                     "init_time": str(time.time()),
-                    "owner": self.worker_id
+                    "owner": self.worker_id,
+                    ChannelMetadataField.TRANSCODE: str(transcode)
                 }
                 if stream_id:
                     initial_metadata["stream_id"] = str(stream_id)
@@ -601,6 +602,15 @@ class ProxyServer:
                         logger.debug(f"Found stream_id {channel_stream_id} in metadata for channel {channel_id}")
                     except (ValueError, TypeError) as e:
                         logger.debug(f"Could not parse stream_id from metadata: {e}")
+
+                # Restore transcode mode from metadata if not explicitly provided
+                if not transcode and existing_metadata:
+                    stored_transcode = existing_metadata.get(ChannelMetadataField.TRANSCODE, 'False')
+                    transcode = str(stored_transcode).lower() == 'true'
+                    if transcode:
+                        logger.info(
+                            f"Restored transcode={transcode} for channel {channel_id} from Redis metadata"
+                        )
 
             # Check if channel is already owned
             current_owner = self.get_channel_owner(channel_id)
@@ -655,7 +665,8 @@ class ProxyServer:
                     "init_time": str(time.time()),
                     "last_active": str(time.time()),
                     "owner": self.worker_id,
-                    "state": ChannelState.INITIALIZING  # Use constant instead of string literal
+                    "state": ChannelState.INITIALIZING,
+                    ChannelMetadataField.TRANSCODE: str(transcode)
                 }
                 if channel_user_agent:
                     metadata["user_agent"] = channel_user_agent
@@ -785,7 +796,7 @@ class ProxyServer:
                 # If the channel is in a valid state, check if the owner is still active
                 if state in valid_states:
                     # Check if owner still exists by checking heartbeat
-                    owner_heartbeat_key = f"ts_proxy:worker:{owner}:heartbeat"
+                    owner_heartbeat_key = RedisKeys.worker_heartbeat(owner)
                     owner_alive = self.redis_client.exists(owner_heartbeat_key)
 
                     if owner_alive:
@@ -1076,7 +1087,7 @@ class ProxyServer:
                 try:
                     # Send worker heartbeat first
                     if self.redis_client:
-                        worker_heartbeat_key = f"ts_proxy:worker:{self.worker_id}:heartbeat"
+                        worker_heartbeat_key = RedisKeys.worker_heartbeat(self.worker_id)
                         self._execute_redis_command(
                             lambda: self.redis_client.setex(worker_heartbeat_key, 30, str(time.time()))
                         )
@@ -1428,7 +1439,7 @@ class ProxyServer:
                     # Check if owner is still alive
                     owner_alive = False
                     if owner:
-                        owner_heartbeat_key = f"ts_proxy:worker:{owner}:heartbeat"
+                        owner_heartbeat_key = RedisKeys.worker_heartbeat(owner)
                         owner_alive = self.redis_client.exists(owner_heartbeat_key)
 
                     # Check client count

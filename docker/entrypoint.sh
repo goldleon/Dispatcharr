@@ -90,6 +90,7 @@ else
     export POSTGRES_HOST=${POSTGRES_HOST:-localhost}
 fi
 export POSTGRES_PORT=${POSTGRES_PORT:-5432}
+export POSTGRES_MAX_CONNECTIONS=${POSTGRES_MAX_CONNECTIONS:-200}
 export PG_VERSION=$(ls /usr/lib/postgresql/ | sort -V | tail -n 1)
 export PG_BINDIR="/usr/lib/postgresql/${PG_VERSION}/bin"
 export REDIS_HOST=${REDIS_HOST:-localhost}

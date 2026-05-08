@@ -135,7 +135,7 @@ def stream_ts(request, channel_id, user=None):
                         owner_field = ChannelMetadataField.OWNER
                         if owner_field in metadata:
                             owner = metadata[owner_field]
-                            owner_heartbeat_key = f"ts_proxy:worker:{owner}:heartbeat"
+                            owner_heartbeat_key = RedisKeys.worker_heartbeat(owner)
                             if proxy_server.redis_client.exists(owner_heartbeat_key):
                                 # Owner is still active with unknown state - don't reinitialize
                                 needs_initialization = False
