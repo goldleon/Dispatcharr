@@ -1435,55 +1435,54 @@ class ProxyServer:
                     client_set_key = RedisKeys.clients(channel_id)
                     client_count = self.redis_client.scard(client_set_key) or 0
 
-                    # If no owner and no clients, clean it up
+                    # Get state for checks
+                    state = metadata.get('state', 'unknown')
+
+                    # Case A: Owner is alive but channel is in terminal state
                     if owner_alive and state in ['error', 'stopped']:
-                        # Owner is alive but channel is in terminal state — check if it's been
-                        # in this state too long and should be cleaned up from Redis registry.
+                        # Check if it's been in this state too long and should be cleaned up
                         state_changed = float(metadata.get('state_changed_at', 0))
                         if state_changed > 0 and (time.time() - state_changed) > 300:
                             logger.info(f"Channel {channel_id} in terminal state {state} for >5m - forced cleanup")
                             self._clean_redis_keys(channel_id)
-                            continue
+                        continue
 
-                    if not owner_alive and client_count > 0:
-                        state = metadata.get('state', 'unknown')
-                        logger.warning(f"Found orphaned metadata for channel {channel_id} (state: {state}, owner: {owner}, clients: {client_count}) - cleaning up")
-
-                        # If we have it locally, stop it properly to clean up transcode/proxy processes
-                        if channel_id in self.stream_managers or channel_id in self.client_managers:
-                            logger.info(f"Channel {channel_id} is local - calling stop_channel to clean up processes")
-                            self.stop_channel(channel_id)
-                        else:
-                            # Just clean up Redis keys for remote channels
-                            self._clean_redis_keys(channel_id)
-                    elif not owner_alive and client_count > 0:
-                        # SCARD may include ghost entries from a dead worker's
-                        # expired metadata hashes. Validate before deciding.
-                        stale_ids = ClientManager.remove_ghost_clients(
-                            self.redis_client, channel_id
-                        )
-                        real_count = max(0, client_count - len(stale_ids))
-                        if real_count <= 0:
-                            # No real clients remain — safe to clean up.
-                            state = metadata.get('state', 'unknown')
-                            logger.warning(
-                                f"Orphaned channel {channel_id} (state: {state}, "
-                                f"owner: {owner}) had {client_count} ghost client(s) "
-                                f"- cleaning up"
-                            )
+                    # Case B: Owner is dead
+                    if not owner_alive:
+                        if client_count == 0:
+                            # Orphaned metadata with no clients - clean it up
+                            logger.info(f"Found orphaned metadata for channel {channel_id} (state: {state}, owner: {owner}) with no clients - cleaning up")
                             if channel_id in self.stream_managers or channel_id in self.client_managers:
                                 self.stop_channel(channel_id)
                             else:
                                 self._clean_redis_keys(channel_id)
                         else:
-                            logger.warning(
-                                f"Orphaned channel {channel_id} still has "
-                                f"{real_count} live client(s) after ghost removal "
-                                f"- triggering automated ownership takeover"
+                            # Orphaned metadata with clients - check for ghost entries
+                            stale_ids = ClientManager.remove_ghost_clients(
+                                self.redis_client, channel_id
                             )
-                            # Attempt takeover: this will initialize the channel on THIS worker
-                            # if it successfully acquires the ownership lock.
-                            gevent.spawn(self.initialize_channel, None, channel_id)
+                            real_count = max(0, client_count - len(stale_ids))
+                            if real_count <= 0:
+                                # No real clients remain — safe to clean up.
+                                logger.warning(
+                                    f"Orphaned channel {channel_id} (state: {state}, "
+                                    f"owner: {owner}) had {client_count} ghost client(s) "
+                                    f"- cleaning up"
+                                )
+                                if channel_id in self.stream_managers or channel_id in self.client_managers:
+                                    self.stop_channel(channel_id)
+                                else:
+                                    self._clean_redis_keys(channel_id)
+                            else:
+                                # Real clients remain - attempt takeover
+                                logger.warning(
+                                    f"Orphaned channel {channel_id} still has "
+                                    f"{real_count} live client(s) after ghost removal "
+                                    f"- triggering automated ownership takeover"
+                                )
+                                # Attempt takeover: this will initialize the channel on THIS worker
+                                # if it successfully acquires the ownership lock.
+                                gevent.spawn(self.initialize_channel, None, channel_id)
 
                 except Exception as e:
                     logger.error(f"Error processing metadata key {key}: {e}", exc_info=True)

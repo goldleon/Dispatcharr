@@ -412,8 +412,8 @@ class StreamGenerator:
 
             if 'owner' in metadata:
                 owner = metadata['owner']
-                alive_key = f"ts_proxy:workers:{owner}:alive"
-                if not proxy_server.redis_client.exists(alive_key):
+                owner_heartbeat_key = RedisKeys.worker_heartbeat(owner)
+                if not proxy_server.redis_client.exists(owner_heartbeat_key):
                     logger.warning(f"[{self.client_id}] Detected dead owner {owner}, terminating stream to trigger client retry/takeover")
                     return False
 
@@ -564,8 +564,8 @@ class StreamGenerator:
                         metadata_key = RedisKeys.channel_metadata(self.channel_id)
                         owner = proxy_server.redis_client.hget(metadata_key, 'owner')
                         if owner:
-                            alive_key = f"ts_proxy:workers:{owner}:alive"
-                            if not proxy_server.redis_client.exists(alive_key):
+                            owner_heartbeat_key = RedisKeys.worker_heartbeat(owner)
+                            if not proxy_server.redis_client.exists(owner_heartbeat_key):
                                 logger.warning(f"[{self.client_id}] Channel owner {owner} is dead, disconnecting client to force retry")
                                 return True
 
