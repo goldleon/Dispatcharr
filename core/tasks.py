@@ -798,10 +798,17 @@ def check_for_version_update():
             # Parse timestamps for comparison
             # Handle both ISO-8601 (modern) and compact (legacy) formats for local build timestamp
             try:
-                if 'T' in __timestamp__ or '-' in __timestamp__:
+                if 'T' in __timestamp__ or ' ' in __timestamp__:
                     local_dt = datetime.fromisoformat(__timestamp__.replace('Z', '+00:00'))
+                elif '_' in __timestamp__:
+                    # Handle YYYY-MM-DD_HH-MM-SS format
+                    local_dt = datetime.strptime(__timestamp__, "%Y-%m-%d_%H-%M-%S").replace(tzinfo=timezone.utc)
                 else:
                     local_dt = datetime.strptime(__timestamp__, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+
+                # Ensure local_dt is always timezone-aware for comparison
+                if local_dt.tzinfo is None:
+                    local_dt = local_dt.replace(tzinfo=timezone.utc)
             except (ValueError, AttributeError, TypeError) as e:
                 logger.error(f"Failed to parse build __timestamp__ '{__timestamp__}': {e}")
                 return
