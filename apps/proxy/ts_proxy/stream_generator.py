@@ -349,7 +349,7 @@ class StreamGenerator:
                     gevent.sleep(Config.KEEPALIVE_INTERVAL)  # Replace time.sleep
                 else:
                     # Standard wait with backoff
-                    sleep_time = min(0.1 * self.consecutive_empty, 1.0)
+                    sleep_time = min(0.05 * self.consecutive_empty, 0.2)
                     gevent.sleep(sleep_time)  # Replace time.sleep
 
                 # Log empty reads periodically
