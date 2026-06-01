@@ -1024,6 +1024,9 @@ def stream_xc_movie(request, username, password, stream_id, extension):
 
     user = get_object_or_404(User, username=username)
 
+    if not network_access_allowed(request, 'STREAMS', user):
+        return Response({"error": "Forbidden"}, status=403)
+
     custom_properties = user.custom_properties or {}
 
     if "xc_password" not in custom_properties:
@@ -1057,6 +1060,9 @@ def stream_xc_episode(request, username, password, stream_id, extension):
     profile_id = request.GET.get('profile_id')
 
     user = get_object_or_404(User, username=username)
+
+    if not network_access_allowed(request, 'STREAMS', user):
+        return Response({"error": "Forbidden"}, status=403)
 
     custom_properties = user.custom_properties or {}
 

@@ -5,7 +5,7 @@ import re
 import gc
 import time
 from core.utils import RedisClient
-from apps.proxy.ts_proxy.channel_status import ChannelStatus
+from apps.proxy.live_proxy.channel_status import ChannelStatus
 from core.utils import send_websocket_update
 from apps.proxy.vod_proxy.multi_worker_connection_manager import MultiWorkerVODConnectionManager
 from apps.m3u.models import M3UAccountProfile
@@ -21,7 +21,7 @@ def fetch_channel_stats():
 
     try:
         # Basic info for all channels
-        channel_pattern = "ts_proxy:channel:*:metadata"
+        channel_pattern = "live:channel:*:metadata"
         all_channels = []
 
         # Extract channel IDs from keys
@@ -29,7 +29,7 @@ def fetch_channel_stats():
         while True:
             cursor, keys = redis_client.scan(cursor, match=channel_pattern)
             for key in keys:
-                channel_id_match = re.search(r"ts_proxy:channel:(.*):metadata", key)
+                channel_id_match = re.search(r"live:channel:(.*):metadata", key)
                 if channel_id_match:
                     ch_id = channel_id_match.group(1)
                     channel_info = ChannelStatus.get_basic_channel_info(ch_id)
