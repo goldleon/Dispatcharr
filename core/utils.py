@@ -796,27 +796,38 @@ HEADERS_TO_STRIP = frozenset({
 })
 
 def build_upstream_headers(base_headers: dict = None, user_agent: str = None) -> dict:
-    """Strip client-identifying headers from upstream requests and adopt browser-like headers."""
+    """Strip client-identifying headers from upstream requests and adopt browser-like headers.
+
+    IMPORTANT: Accept-Encoding is intentionally omitted (no gzip/deflate/br).
+    Video and binary media streams must never be transparently compressed:
+    - requests silently decompresses the body, so the proxy forwards raw bytes
+      while the upstream Content-Length reflects the compressed size.
+    - This mismatches the byte offsets in MP4/MKV container atoms, corrupting
+      range seeks and causing audio tracks to disappear or play desynchronised.
+    """
     # Start with a common set of browser-like headers
     headers = {
         'User-Agent': user_agent or 'VLC/3.0.21 LibVLC/3.0.21',
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br',
+        # Accept-Encoding deliberately absent — see docstring above
         'Connection': 'keep-alive',
         'Cache-Control': 'no-cache',
         'Pragma': 'no-cache'
     }
-    
-    # Merge with base_headers if provided
+
+    # Merge with base_headers if provided, but never allow Accept-Encoding
+    # to be re-introduced via base_headers (callers occasionally copy client headers).
     if base_headers:
         headers.update(base_headers)
-        
+        headers.pop('Accept-Encoding', None)
+        headers.pop('accept-encoding', None)
+
     # Strip identifying headers using case-insensitive comparison
     stripped_headers = {}
     for k, v in headers.items():
         if k.lower() not in HEADERS_TO_STRIP:
             stripped_headers[k] = v
-            
+
     return stripped_headers
 

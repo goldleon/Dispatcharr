@@ -375,6 +375,13 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                     logger.info(f"[VOD-SEEK] Rapid request detected ({time_diff:.1f}s) - likely seeking")
 
             _request_times[request_key] = current_time
+
+            # Prune stale entries to prevent unbounded memory growth
+            if len(_request_times) > 10000:
+                cutoff = current_time - 300  # Remove entries older than 5 minutes
+                stale_keys = [k for k, v in _request_times.items() if v < cutoff]
+                for k in stale_keys:
+                    del _request_times[k]
         else:
             logger.info(f"[VOD-RANGE] No Range header - full content request")
 

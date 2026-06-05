@@ -462,10 +462,11 @@ class RedisBackedVODConnection:
                 state.final_url = None
                 response = self.local_session.get(
                     state.stream_url,
-                    headers=headers,
+                    headers=build_upstream_headers(headers),
                     stream=True,
                     timeout=(10, 10),
-                    allow_redirects=True
+                    allow_redirects=True,
+                    verify=state.ssl_verify
                 )
 
 
@@ -539,6 +540,12 @@ class RedisBackedVODConnection:
                 # Fallback: save without lock but skip active_streams to avoid overwrite
                 logger.warning(f"[{self.session_id}] Could not acquire lock for get_stream state save")
 
+            # Close any prior response before overwriting to avoid leaking the TCP socket.
+            if self.local_response:
+                try:
+                    self.local_response.close()
+                except Exception:
+                    pass
             self.local_response = response
             return response
 
@@ -924,15 +931,9 @@ class MultiWorkerVODConnectionManager:
             current_time = time.time()
             expiry_time = current_time + 60  # 60s heartbeat
 
-            # Atomic check-and-set using Lua or Pipeline
-            # We'll use a pipeline for simplicity as ZCARD is fast
-            pipeline = self.redis_client.pipeline()
-            pipeline.zremrangebyscore(key, "-inf", current_time)
-            pipeline.zcard(key)
-            pipeline.execute() # Just to be sure we have current count
-
+            # Single atomic purge+count via _check_profile_count (avoids double round-trip)
             count = self._check_profile_count(m3u_profile.id)
-            
+
             if count < m3u_profile.max_streams:
                 self.redis_client.zadd(key, {session_id: expiry_time})
                 logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved for session {session_id}: {count + 1}/{m3u_profile.max_streams}")
@@ -1041,12 +1042,8 @@ class MultiWorkerVODConnectionManager:
                 return
 
             profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
-            if session_id:
-                self.redis_client.zrem(profile_connections_key, session_id)
-                logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id}")
-            else:
-                # Fallback: no session_id (e.g. failed connection), expire the ZSET entry if possible
-                logger.warning(f"[PROFILE-DECR] No session_id for profile {m3u_profile_id} — cannot ZREM, relying on expiry")
+            self.redis_client.zrem(profile_connections_key, session_id)
+            logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id}")
         except Exception as e:
             logger.error(f"Error decrementing profile connections: {e}")
 
@@ -1444,10 +1441,23 @@ class MultiWorkerVODConnectionManager:
                                             stop_signal_detected = True
                                             break
                                         self._refresh_profile_heartbeat(m3u_profile.id, effective_session_id)
+                                        # Update Redis state during resume (keeps stats accurate)
+                                        if redis_connection._acquire_lock():
+                                            try:
+                                                state = redis_connection._get_connection_state()
+                                                if state:
+                                                    state.last_activity = time.time()
+                                                    state.bytes_sent = bytes_sent
+                                                    redis_connection._save_connection_state(state)
+                                            finally:
+                                                redis_connection._release_lock()
                             # Completed without another drop
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Resume completed after {resume_attempt} attempt(s): {bytes_sent:,} total bytes sent")
                             resume_attempted = True
                             break
+                        except requests.exceptions.ChunkedEncodingError as retry_e:
+                            logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
+                            time.sleep(0.5 * resume_attempt)  # brief back-off before next retry
                         except GeneratorExit:
                             # Client disconnected while we were mid-resume.
                             # The outer except GeneratorExit: will NOT be reached because we are
