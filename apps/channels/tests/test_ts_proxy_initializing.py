@@ -35,6 +35,7 @@ def _make_stream_manager(tried_stream_ids=None, max_retries=3):
     sm.connected = False
     sm.transcode_process_active = False
     sm._buffer_check_timers = []
+    sm._buffer_check_greenlet = None
     sm.url = "http://example.com/stream"
     sm.url_switching = False
     sm.url_switch_start_time = 0

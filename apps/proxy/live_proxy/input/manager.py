@@ -480,6 +480,8 @@ class StreamManager:
                     metadata_key = RedisKeys.channel_metadata(self.channel_id)
                     owner_key = RedisKeys.channel_owner(self.channel_id)
                     current_owner = self.buffer.redis_client.get(owner_key)
+                    if isinstance(current_owner, bytes):
+                        current_owner = current_owner.decode('utf-8')
 
                     is_owner = (
                         current_owner
@@ -494,8 +496,9 @@ class StreamManager:
                             metadata_key, ChannelMetadataField.STATE
                         )
                         current_state = (
-                            current_state_bytes
-                            if current_state_bytes else None
+                            current_state_bytes.decode('utf-8')
+                            if isinstance(current_state_bytes, bytes)
+                            else current_state_bytes
                         )
                         should_update = current_state in ChannelState.PRE_ACTIVE
                         if not should_update and current_state:
