@@ -6,6 +6,7 @@ from .models import EPGSource, ProgramData  # Updated: import ProgramData instea
 from .serializers import EPGSourceSerializer
 from django.utils import timezone
 from datetime import timedelta
+import gevent
 
 
 def epg_view(request):
@@ -21,12 +22,16 @@ def epg_view(request):
     programmes = ProgramData.objects.filter(
         start_time__gte=now,
         start_time__lte=end_time
-    ).order_by('start_time')
+    ).select_related('epg__channel').order_by('start_time')
     print(f"[EPG VIEW] Found {programmes.count()} programme(s) between now and end_time.")
 
     # Group programmes by channel (retrieved via the EPGData parent)
     channels = {}
+    idx = 0
     for prog in programmes:
+        idx += 1
+        if idx % 500 == 0:
+            gevent.sleep(0)  # Yield control to gevent event loop
         # Assume that the EPGData instance (prog.epg) has a link to a Channel.
         channel = prog.epg.channel if prog.epg and prog.epg.channel else None
         if not channel:

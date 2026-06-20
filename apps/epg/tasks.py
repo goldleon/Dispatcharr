@@ -37,6 +37,8 @@ from core.utils import (
     build_upstream_headers,
 )
 
+import gevent
+
 logger = logging.getLogger(__name__)
 
 SD_BASE_URL = 'https://json.schedulesdirect.org/20141201'
@@ -1326,6 +1328,8 @@ def parse_channels_only(source):
             total_elements_processed = 0  # Track total elements processed, not just channels
             for _, elem in channel_parser:
                 total_elements_processed += 1
+                if total_elements_processed % 5000 == 0:
+                    gevent.sleep(0)  # Yield control to gevent event loop
                 # Only process channel elements
                 if elem.tag == 'channel':
                     channel_count += 1
@@ -2221,7 +2225,11 @@ def parse_programs_for_source(epg_source, tvg_id=None):
                     resolve_entities=False,
                 )
 
+                loop_count = 0
                 for _, elem in program_parser:
+                    loop_count += 1
+                    if loop_count % 5000 == 0:
+                        gevent.sleep(0)  # Yield control to gevent event loop
                     channel_id = elem.get('channel')
 
                     if channel_id not in mapped_tvg_ids:
@@ -4558,12 +4566,17 @@ def build_programme_index(source_id):
             buf.extend(chunk)
             search_from = 0
 
+            tags_found = 0
             while True:
                 idx, tag_end = _find_programme_tag(buf, search_from)
                 if idx == -1:
                     break
                 if tag_end == -1 and chunk:
                     break  # incomplete tag at buffer edge, need more data
+
+                tags_found += 1
+                if tags_found % 5000 == 0:
+                    gevent.sleep(0)  # Yield control to gevent event loop
 
                 abs_pos = buf_offset + idx
                 m = _CHANNEL_ATTR_RE.search(

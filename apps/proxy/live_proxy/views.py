@@ -827,6 +827,7 @@ def channel_status(request, channel_id=None):
                     cursor, match=channel_pattern
                 )
                 for key in keys:
+                    gevent.sleep(0)  # Yield control to gevent event loop
                     channel_id_match = re.search(
                         r"live:channel:(.*):metadata", key
                     )

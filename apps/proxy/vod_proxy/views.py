@@ -27,6 +27,8 @@ from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
 from core.utils import dispatcharr_user_agent
 
+import gevent
+
 logger = logging.getLogger(__name__)
 
 _request_times = {}
@@ -833,6 +835,7 @@ def build_vod_stats_data(redis_client):
             cursor, keys = redis_client.scan(cursor, match=pattern, count=100)
 
             for key in keys:
+                gevent.sleep(0)  # Yield control to gevent event loop
                 try:
                     connection_data = redis_client.hgetall(key)
 

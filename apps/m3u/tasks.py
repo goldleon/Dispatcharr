@@ -35,6 +35,8 @@ from core.xtream_codes import Client as XCClient
 from core.utils import send_websocket_update
 from .utils import normalize_stream_url
 
+import gevent
+
 logger = logging.getLogger(__name__)
 
 BATCH_SIZE = 1500  # Optimized batch size for threading
@@ -945,7 +947,11 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
                         f"Found {len(streams)} streams for category {group_name}"
                     )
 
+                    loop_count = 0
                     for stream in streams:
+                        loop_count += 1
+                        if loop_count % 500 == 0:
+                            gevent.sleep(0)  # Yield control to gevent event loop
                         name = stream.get("name") or f"{account.name} - {stream.get('stream_id', 'Unknown')}"
                         if not stream.get("name"):
                             logger.warning(
@@ -1009,7 +1015,11 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
             )
         }
 
+        loop_count = 0
         for stream_hash, stream_props in stream_hashes.items():
+            loop_count += 1
+            if loop_count % 500 == 0:
+                gevent.sleep(0)  # Yield control to gevent event loop
             if stream_hash in existing_streams:
                 obj = existing_streams[stream_hash]
                 # Optimized field comparison for XC streams
@@ -1122,7 +1132,11 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
     logger.debug(f"Processing batch of {len(batch)} for M3U account {account_id}")
     if compiled_filters:
         logger.debug(f"Using compiled filters: {[f[1].regex_pattern for f in compiled_filters]}")
+    loop_count = 0
     for stream_info in batch:
+        loop_count += 1
+        if loop_count % 500 == 0:
+            gevent.sleep(0)  # Yield control to gevent event loop
         try:
             name, url = stream_info["name"], stream_info["url"]
 
