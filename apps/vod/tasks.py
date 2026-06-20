@@ -45,6 +45,27 @@ def clean_metadata_id(value):
     return val_str
 
 
+def lookup_by_name_year(model, name_year_pairs):
+    """Return {(name, year): row} for rows without TMDB/IMDB IDs.
+
+    Scoped to the names in this batch instead of scanning the full table.
+    """
+    if not name_year_pairs:
+        return {}
+    wanted = set(name_year_pairs)
+    names = {name for name, _ in wanted}
+    found = {}
+    for row in model.objects.filter(
+        tmdb_id__isnull=True,
+        imdb_id__isnull=True,
+        name__in=names,
+    ):
+        key = (row.name, row.year)
+        if key in wanted:
+            found[key] = row
+    return found
+
+
 @shared_task
 def refresh_vod_content(account_id):
     """Refresh VOD content for an M3U account with batch processing for improved performance"""
@@ -205,6 +226,7 @@ def refresh_movies(client, account, categories_by_provider, relations, scan_star
         logger.info(f"Processing movie chunk {chunk_num}/{total_chunks} ({len(chunk)} movies)")
         process_movie_batch(account, chunk, categories_by_provider, relations, scan_start_time)
 
+    del all_movies_data
     logger.info(f"Completed processing all {total_movies} movies in {total_chunks} chunks")
 
 
@@ -259,6 +281,7 @@ def refresh_series(client, account, categories_by_provider, relations, scan_star
         logger.info(f"Processing series chunk {chunk_num}/{total_chunks} ({len(chunk)} series)")
         process_series_batch(account, chunk, categories_by_provider, relations, scan_start_time)
 
+    del all_series_data
     logger.info(f"Completed processing all {total_series} series in {total_chunks} chunks")
 
 
@@ -462,6 +485,26 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
             trailer = extract_string_from_array_or_string(trailer_raw) if trailer_raw else None
             logo_url = movie_data.get('stream_icon') or ''
 
+            director = extract_string_from_array_or_string(
+                movie_data.get('director') or ''
+            )
+            actors_raw = movie_data.get('actors') or movie_data.get('cast') or ''
+            if isinstance(actors_raw, list):
+                actors = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
+            else:
+                actors = actors_raw.strip() if actors_raw else None
+            release_date = movie_data.get('release_date') or movie_data.get('releasedate') or ''
+
+            custom_props = {}
+            if trailer:
+                custom_props['youtube_trailer'] = trailer
+            if director:
+                custom_props['director'] = director
+            if actors:
+                custom_props['actors'] = actors
+            if release_date:
+                custom_props['release_date'] = release_date
+
             movie_props = {
                 'name': name,
                 'year': year,
@@ -471,7 +514,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 'rating': rating,
                 'genre': genre,
                 'duration_secs': duration_secs,
-                'custom_properties': {'trailer': trailer} if trailer else None,
+                'custom_properties': custom_props or None,
             }
 
             movie_keys[movie_key] = {
@@ -542,10 +585,12 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
     # Query by name+year for movies without external IDs
     name_year_keys = [k for k in movie_keys.keys() if k.startswith('name_')]
     if name_year_keys:
-        for movie in Movie.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
-            key = f"name_{movie.name}_{movie.year or 'None'}"
-            if key in name_year_keys:
-                existing_movies[key] = movie
+        name_year_pairs = [
+            (movie_keys[k]['props']['name'], movie_keys[k]['props'].get('year'))
+            for k in name_year_keys
+        ]
+        for key_tuple, movie in lookup_by_name_year(Movie, name_year_pairs).items():
+            existing_movies[f"name_{key_tuple[0]}_{key_tuple[1] or 'None'}"] = movie
 
     # Get existing relations
     stream_ids = [data['stream_id'] for data in movie_keys.values()]
@@ -571,8 +616,18 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
 
             for field, value in movie_props.items():
                 if field == 'custom_properties':
-                    if value != movie.custom_properties:
-                        movie.custom_properties = value
+                    # Merge: preserve advanced-refresh keys; don't overwrite director/actors/release_date if already set.
+                    existing_cp = movie.custom_properties or {}
+                    incoming_cp = value or {}
+                    merged = dict(existing_cp)
+                    for k, v in incoming_cp.items():
+                        if k in ('director', 'actors', 'release_date'):
+                            if not existing_cp.get(k):
+                                merged[k] = v
+                        else:
+                            merged[k] = v
+                    if merged != existing_cp:
+                        movie.custom_properties = merged
                         updated = True
                 elif getattr(movie, field) != value:
                     setattr(movie, field, value)
@@ -587,8 +642,6 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                         movie._logo_to_update = new_logo
                         logo_updated = True
                 elif movie.logo_id:
-                    # Logo URL exists but logo creation failed or logo not found
-                    # Clear the orphaned logo reference
                     logger.warning(f"Logo URL provided but logo not found in database for movie '{movie.name}', clearing logo reference")
                     movie._logo_to_update = None
                     logo_updated = True
@@ -654,12 +707,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 existing_by_tmdb = {m.tmdb_id: m for m in Movie.objects.filter(tmdb_id__in=tmdb_ids)} if tmdb_ids else {}
                 existing_by_imdb = {m.imdb_id: m for m in Movie.objects.filter(imdb_id__in=imdb_ids)} if imdb_ids else {}
 
-                existing_by_name_year = {}
-                if name_year_pairs:
-                    for movie in Movie.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
-                        key = (movie.name, movie.year)
-                        if key in name_year_pairs:
-                            existing_by_name_year[key] = movie
+                existing_by_name_year = lookup_by_name_year(Movie, name_year_pairs)
 
                 # Check each movie against the bulk query results
                 movies_actually_created = []
@@ -805,7 +853,14 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 value = series_data.get(key)
                 if value:
                     # For string-like fields that might be arrays, extract clean strings
-                    if key in ['poster_path', 'youtube_trailer', 'cast', 'director']:
+                    if key == 'cast':
+                        if isinstance(value, list):
+                            clean_value = ', '.join(s.strip() for s in value if s and str(s).strip()) or None
+                        else:
+                            clean_value = extract_string_from_array_or_string(value)
+                        if clean_value:
+                            additional_metadata[key] = clean_value
+                    elif key in ['poster_path', 'youtube_trailer', 'director']:
                         clean_value = extract_string_from_array_or_string(value)
                         if clean_value:
                             additional_metadata[key] = clean_value
@@ -897,10 +952,12 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
     # Query by name+year for series without external IDs
     name_year_keys = [k for k in series_keys.keys() if k.startswith('name_')]
     if name_year_keys:
-        for series in Series.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
-            key = f"name_{series.name}_{series.year or 'None'}"
-            if key in name_year_keys:
-                existing_series[key] = series
+        name_year_pairs = [
+            (series_keys[k]['props']['name'], series_keys[k]['props'].get('year'))
+            for k in name_year_keys
+        ]
+        for key_tuple, series in lookup_by_name_year(Series, name_year_pairs).items():
+            existing_series[f"name_{key_tuple[0]}_{key_tuple[1] or 'None'}"] = series
 
     # Get existing relations
     series_ids = [data['series_id'] for data in series_keys.values()]
@@ -1009,12 +1066,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 existing_by_tmdb = {s.tmdb_id: s for s in Series.objects.filter(tmdb_id__in=tmdb_ids)} if tmdb_ids else {}
                 existing_by_imdb = {s.imdb_id: s for s in Series.objects.filter(imdb_id__in=imdb_ids)} if imdb_ids else {}
 
-                existing_by_name_year = {}
-                if name_year_pairs:
-                    for series in Series.objects.filter(tmdb_id__isnull=True, imdb_id__isnull=True):
-                        key = (series.name, series.year)
-                        if key in name_year_pairs:
-                            existing_by_name_year[key] = series
+                existing_by_name_year = lookup_by_name_year(Series, name_year_pairs)
 
                 # Check each series against the bulk query results
                 series_actually_created = []
@@ -2185,26 +2237,25 @@ def refresh_movie_advanced_data(m3u_movie_relation_id, force_refresh=False):
                             movie.imdb_id = imdb_id_to_set
                             updated = True
                             logger.debug(f"Set imdb_id {imdb_id_to_set} on movie {movie.id}")
-                # Only update trailer if we have a non-empty value and either no existing value or existing value is empty
                 if should_update_field(custom_props.get('youtube_trailer'), info.get('trailer')):
                     custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('trailer'))
                     updated = True
                 if should_update_field(custom_props.get('youtube_trailer'), info.get('youtube_trailer')):
                     custom_props['youtube_trailer'] = extract_string_from_array_or_string(info.get('youtube_trailer'))
                     updated = True
-                # Only update backdrop_path if we have a non-empty value and either no existing value or existing value is empty
                 if should_update_field(custom_props.get('backdrop_path'), info.get('backdrop_path')):
                     backdrop_url = extract_string_from_array_or_string(info.get('backdrop_path'))
                     custom_props['backdrop_path'] = [backdrop_url] if backdrop_url else None
                     updated = True
-                # Only update actors if we have a non-empty value and either no existing value or existing value is empty
-                if should_update_field(custom_props.get('actors'), info.get('actors')):
-                    custom_props['actors'] = extract_string_from_array_or_string(info.get('actors'))
-                    updated = True
-                if should_update_field(custom_props.get('actors'), info.get('cast')):
-                    custom_props['actors'] = extract_string_from_array_or_string(info.get('cast'))
-                    updated = True
-                # Only update director if we have a non-empty value and either no existing value or existing value is empty
+                for actors_key in ('actors', 'cast'):
+                    actors_raw = info.get(actors_key)
+                    if should_update_field(custom_props.get('actors'), actors_raw):
+                        if isinstance(actors_raw, list):
+                            custom_props['actors'] = ', '.join(s.strip() for s in actors_raw if s and str(s).strip()) or None
+                        else:
+                            custom_props['actors'] = extract_string_from_array_or_string(actors_raw)
+                        updated = True
+                        break
                 if should_update_field(custom_props.get('director'), info.get('director')):
                     custom_props['director'] = extract_string_from_array_or_string(info.get('director'))
                     updated = True

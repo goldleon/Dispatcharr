@@ -917,31 +917,35 @@ class MultiWorkerVODConnectionManager:
 
     def _check_and_reserve_profile_slot(self, m3u_profile, session_id: str) -> bool:
         """
-        Atomically check and reserve a connection slot using ZSET heartbeat pattern.
+        Atomically check and reserve a connection slot for the given profile and session.
+
+        Returns:
+            bool: True if slot was reserved (or unlimited), False if at capacity
         """
-        if m3u_profile.max_streams == 0:  # Unlimited
-            return True
+        from apps.m3u.connection_pool import reserve_profile_slot
 
         if not session_id:
             logger.warning("[PROFILE-RESERVE] No session_id provided, cannot reserve slot")
             return False
 
         try:
-            key = self._get_profile_connections_key(m3u_profile.id)
-            current_time = time.time()
-            expiry_time = current_time + 60  # 60s heartbeat
-
-            # Single atomic purge+count via _check_profile_count (avoids double round-trip)
-            count = self._check_profile_count(m3u_profile.id)
-
-            if count < m3u_profile.max_streams:
+            reserved, new_count, _failure_reason = reserve_profile_slot(
+                m3u_profile, self.redis_client
+            )
+            if reserved:
+                key = self._get_profile_connections_key(m3u_profile.id)
+                expiry_time = time.time() + 60  # 60s heartbeat
                 self.redis_client.zadd(key, {session_id: expiry_time})
-                logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved for session {session_id}: {count + 1}/{m3u_profile.max_streams}")
-                return True
-
-            logger.info(f"[PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: {count}/{m3u_profile.max_streams}")
-            return False
-
+                logger.info(
+                    f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved: "
+                    f"{new_count}/{m3u_profile.max_streams} (session {session_id})"
+                )
+            else:
+                logger.info(
+                    f"[PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: "
+                    f"{new_count}/{m3u_profile.max_streams}"
+                )
+            return reserved
         except Exception as e:
             logger.error(f"Error reserving profile slot: {e}")
             return False
@@ -957,18 +961,6 @@ class MultiWorkerVODConnectionManager:
             logger.debug(f"[PROFILE-HEARTBEAT] Refreshed heartbeat for session {session_id} (profile {m3u_profile_id})")
         except Exception as e:
             logger.error(f"Error refreshing profile heartbeat: {e}")
-
-    def _increment_profile_connections(self, m3u_profile):
-        """Increment profile connection count"""
-        try:
-            profile_connections_key = self._get_profile_connections_key(m3u_profile.id)
-            new_count = self.redis_client.incr(profile_connections_key)
-            logger.info(f"[PROFILE-INCR] Profile {m3u_profile.id} connections: {new_count}")
-            return new_count
-        except Exception as e:
-            logger.error(f"Error incrementing profile connections: {e}")
-            return None
-
     def _trigger_vod_stats_update(self):
         """Trigger a VOD stats WebSocket update in a background thread."""
         threading.Thread(target=self._do_vod_stats_update, daemon=True).start()
@@ -1031,21 +1023,26 @@ class MultiWorkerVODConnectionManager:
             logger.error(f"Failed to trigger VOD stats update: {e}")
 
     def _decrement_profile_connections(self, m3u_profile_id: int, session_id: str = None):
-        """Remove session from profile connection tracking (ZSET heartbeat pattern).
+        """Release profile and shared pool connection counters and ZSET tracking."""
+        from apps.m3u.connection_pool import release_profile_slot
 
-        When session_id is provided, removes it from the ZSET (ZREM).
-        The reconcile_profile_connections task handles expiry-based cleanup.
-        """
         try:
-            if not session_id:
-                logger.warning(f"[PROFILE-DECR] No session_id provided for profile {m3u_profile_id}")
-                return
+            # Release via connection pool
+            release_profile_slot(m3u_profile_id, self.redis_client)
 
-            profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
-            self.redis_client.zrem(profile_connections_key, session_id)
-            logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id}")
+            # If session_id is provided, remove it from ZSET heartbeat tracking
+            if session_id:
+                profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
+                self.redis_client.zrem(profile_connections_key, session_id)
+                logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id} (zrem)")
+
+            profile_key = self._get_profile_connections_key(m3u_profile_id)
+            new_count = int(self.redis_client.get(profile_key) or 0)
+            logger.info(f"[PROFILE-DECR] Profile {m3u_profile_id} connections: {new_count}")
+            return new_count
         except Exception as e:
             logger.error(f"Error decrementing profile connections: {e}")
+            return 0
 
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
                                   client_ip, client_user_agent, request,
