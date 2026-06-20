@@ -2,7 +2,85 @@ from unittest.mock import patch, MagicMock
 
 from django.test import TestCase
 
+from apps.epg.models import EPGSource
 from core.models import CoreSettings, DVR_SETTINGS_KEY, EPG_SETTINGS_KEY
+
+
+class DispatcharrUserAgentTests(TestCase):
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_user_agent(self):
+        from core.utils import dispatcharr_user_agent
+        self.assertEqual(dispatcharr_user_agent(), 'Dispatcharr/1.2.3')
+
+    def test_dispatcharr_dvr_user_agent(self):
+        from core.utils import dispatcharr_dvr_user_agent
+        self.assertEqual(dispatcharr_dvr_user_agent(42), 'Dispatcharr-DVR/recording-42')
+
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_http_headers_with_token(self):
+        from core.utils import dispatcharr_http_headers
+        headers = dispatcharr_http_headers(token='tok123')
+        self.assertEqual(headers, {
+            'User-Agent': 'Dispatcharr/1.2.3',
+            'Content-Type': 'application/json',
+            'token': 'tok123',
+        })
+
+    @patch('version.__version__', '1.2.3')
+    def test_dispatcharr_http_headers_without_content_type(self):
+        from core.utils import dispatcharr_http_headers
+        self.assertEqual(
+            dispatcharr_http_headers(content_type=None),
+            {'User-Agent': 'Dispatcharr/1.2.3'},
+        )
+
+
+class ProgrammeIndexRebuildTests(TestCase):
+    def test_startup_rebuild_does_not_lock_out_queued_build_task(self):
+        EPGSource.objects.update(
+            programme_index={"channels": {}, "interleaved_channels": []}
+        )
+        source = EPGSource.objects.create(
+            name="Missing Index",
+            source_type="xmltv",
+            is_active=True,
+            programme_index=None,
+        )
+
+        class FakeRedis:
+            def __init__(self):
+                self.keys = set()
+
+            def set(self, key, value, nx=False, ex=None):
+                if nx and key in self.keys:
+                    return False
+                self.keys.add(key)
+                return True
+
+            def delete(self, key):
+                self.keys.discard(key)
+
+        fake_redis = FakeRedis()
+
+        from apps.epg.tasks import build_programme_index_task
+        from core.tasks import _rebuild_programme_indices
+
+        def run_task_immediately(source_id):
+            build_programme_index_task(source_id)
+
+        with patch(
+            "core.tasks.RedisClient.get_client", return_value=fake_redis
+        ), patch(
+            "core.utils.RedisClient.get_client", return_value=fake_redis
+        ), patch(
+            "apps.epg.tasks.build_programme_index"
+        ) as mock_build, patch(
+            "apps.epg.tasks.build_programme_index_task.delay",
+            side_effect=run_task_immediately,
+        ):
+            _rebuild_programme_indices()
+
+        mock_build.assert_called_once_with(source.id)
 
 
 class GetDvrSeriesRulesTest(TestCase):
@@ -153,7 +231,7 @@ class EpgIgnoreListsTest(TestCase):
 
 
 class DropDBCommandTlsTest(TestCase):
-    """Verify dropdb management command passes TLS parameters to psycopg2."""
+    """Verify dropdb management command passes TLS parameters to psycopg."""
     databases = []
 
     _DB_WITH_TLS = {
@@ -184,7 +262,7 @@ class DropDBCommandTlsTest(TestCase):
         }
     }
 
-    @patch('core.management.commands.dropdb.psycopg2.connect')
+    @patch('core.management.commands.dropdb.psycopg.connect')
     @patch('core.management.commands.dropdb.connection')
     @patch('builtins.input', return_value='yes')
     def test_dropdb_passes_ssl_kwargs_when_tls_enabled(self, _inp, _conn, mock_connect):
@@ -199,13 +277,14 @@ class DropDBCommandTlsTest(TestCase):
         mock_connect.assert_called_once_with(
             dbname='postgres', user='testuser', password='testpass',
             host='localhost', port=5432,
+            autocommit=True,
             sslmode='verify-full',
             sslrootcert='/certs/ca.crt',
             sslcert='/certs/client.crt',
             sslkey='/certs/client.key',
         )
 
-    @patch('core.management.commands.dropdb.psycopg2.connect')
+    @patch('core.management.commands.dropdb.psycopg.connect')
     @patch('core.management.commands.dropdb.connection')
     @patch('builtins.input', return_value='yes')
     def test_dropdb_no_ssl_kwargs_when_tls_disabled(self, _inp, _conn, mock_connect):
@@ -220,4 +299,5 @@ class DropDBCommandTlsTest(TestCase):
         mock_connect.assert_called_once_with(
             dbname='postgres', user='testuser', password='testpass',
             host='localhost', port=5432,
+            autocommit=True,
         )

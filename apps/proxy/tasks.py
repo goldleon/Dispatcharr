@@ -125,12 +125,13 @@ def reconcile_profile_connections():
             if cursor == 0:
                 break
 
-        # 3. Synchronize with Database and Update Redis Counters
+        # 3. Calculate ServerGroup credential counts and Synchronize with Database
+        from apps.m3u.connection_pool import get_enforced_server_group_for_profile, _credential_counter_key
+
         active_profiles = M3UAccountProfile.objects.filter(is_active=True)
         synced_count = 0
-
-        # Track which profiles we updated to handle those that dropped to 0
         processed_ids = set()
+        cred_counts = {}
 
         for profile in active_profiles:
             actual_count = total_counts.get(profile.id, 0)
@@ -146,18 +147,30 @@ def reconcile_profile_connections():
                 profile.save(update_fields=['active_streams'])
                 synced_count += 1
 
-        # 4. Handle orphaned profile_connections keys for non-existent or inactive profiles
-        # Scan for all profile_connections:{id} (non-zset)
+            # Accumulate ServerGroup credential limit counts
+            group = get_enforced_server_group_for_profile(profile)
+            if group:
+                cred_key = _credential_counter_key(profile, group)
+                if cred_key:
+                    cred_counts[cred_key] = cred_counts.get(cred_key, 0) + actual_count
+
+        # 4. Update ServerGroup Redis counters
+        for cred_key, count in cred_counts.items():
+            logger.debug(f"Reconciliation: Setting ServerGroup connection count for {cred_key} to {count}")
+            redis_client.set(cred_key, count)
+
+        # 5. Handle orphaned profile_connections keys for non-existent or inactive profiles
         cursor = 0
         while True:
             cursor, keys = redis_client.scan(cursor, match="profile_connections:*", count=100)
             for key in keys:
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
                 # Skip zset keys
-                if key.endswith(':zset'):
+                if key_str.endswith(':zset'):
                     continue
 
                 try:
-                    p_id = int(key.split(':')[1])
+                    p_id = int(key_str.split(':')[1])
                     if p_id not in processed_ids:
                         logger.debug(f"Reconciliation: Cleaning up orphaned counter for profile {p_id}")
                         redis_client.delete(key)
@@ -167,7 +180,20 @@ def reconcile_profile_connections():
             if cursor == 0:
                 break
 
-        logger.info(f"Profile connection reconciliation complete. Updated {synced_count} profiles.")
+        # 6. Handle orphaned server_group_connections keys
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor, match="server_group_connections:*", count=100)
+            for key in keys:
+                key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+                if key_str not in cred_counts:
+                    logger.debug(f"Reconciliation: Cleaning up orphaned ServerGroup counter {key_str}")
+                    redis_client.delete(key)
+
+            if cursor == 0:
+                break
+
+        logger.info(f"Profile connection reconciliation complete. Updated {synced_count} profiles, reconciled {len(cred_counts)} ServerGroup credentials.")
         return f"Reconciled {len(total_counts)} profiles, updated {synced_count} in DB."
 
     except Exception as e:
