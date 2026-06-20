@@ -3,6 +3,7 @@ import useAuthStore from './store/auth';
 import useChannelsStore from './store/channels';
 import useLogosStore from './store/logos';
 import useUserAgentsStore from './store/userAgents';
+import useServerGroupsStore from './store/serverGroups';
 import usePlaylistsStore from './store/playlists';
 import useEPGsStore from './store/epgs';
 import useStreamsStore from './store/streams';
@@ -1305,6 +1306,59 @@ export default class API {
     }
   }
 
+  static async getServerGroups() {
+    try {
+      const response = await request(`${host}/api/m3u/server-groups/`);
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve server groups', e);
+    }
+  }
+
+  static async addServerGroup(values) {
+    try {
+      const response = await request(`${host}/api/m3u/server-groups/`, {
+        method: 'POST',
+        body: values,
+      });
+
+      useServerGroupsStore.getState().addServerGroup(response);
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to create server group', e);
+    }
+  }
+
+  static async updateServerGroup(values) {
+    try {
+      const { id, ...payload } = values;
+      const response = await request(`${host}/api/m3u/server-groups/${id}/`, {
+        method: 'PUT',
+        body: payload,
+      });
+
+      useServerGroupsStore.getState().updateServerGroup(response);
+
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update server group', e);
+    }
+  }
+
+  static async deleteServerGroup(id) {
+    try {
+      await request(`${host}/api/m3u/server-groups/${id}/`, {
+        method: 'DELETE',
+      });
+
+      useServerGroupsStore.getState().removeServerGroups([id]);
+    } catch (e) {
+      errorNotification('Failed to delete server group', e);
+    }
+  }
+
   static async getPlaylist(id) {
     try {
       const response = await request(`${host}/api/m3u/accounts/${id}/`);
@@ -1529,6 +1583,21 @@ export default class API {
     }
   }
 
+  static async getCurrentProgramForEpg(epgId) {
+    const response = await request(`${host}/api/epg/current-programs/`, {
+      method: 'POST',
+      body: { epg_data_ids: [epgId] },
+    });
+
+    if (response && response.length > 0) {
+      if (response[0].parsing) {
+        return { parsing: true };
+      }
+      return response[0];
+    }
+    return null;
+  }
+
   // Notice there's a duplicated "refreshPlaylist" method above;
   // you might want to rename or remove one if it's not needed.
 
@@ -1632,11 +1701,11 @@ export default class API {
     }
   }
 
-  static async refreshEPG(id) {
+  static async refreshEPG(id, force = false) {
     try {
       const response = await request(`${host}/api/epg/import/`, {
         method: 'POST',
-        body: { id },
+        body: { id, force },
       });
 
       return response;
@@ -3526,10 +3595,11 @@ export default class API {
     }
   }
 
-  static async getMovieProviderInfo(movieId) {
+  static async getMovieProviderInfo(movieId, relationId = null) {
     try {
+      const params = relationId ? `?relation_id=${relationId}` : '';
       const response = await request(
-        `${host}/api/vod/movies/${movieId}/provider-info/`
+        `${host}/api/vod/movies/${movieId}/provider-info/${params}`
       );
       return response;
     } catch (e) {
@@ -3568,11 +3638,12 @@ export default class API {
     }
   }
 
-  static async getSeriesInfo(seriesId) {
+  static async getSeriesInfo(seriesId, relationId = null) {
     try {
-      // Call the provider-info endpoint that includes episodes
+      const params = new URLSearchParams({ include_episodes: 'true' });
+      if (relationId) params.set('relation_id', relationId);
       const response = await request(
-        `${host}/api/vod/series/${seriesId}/provider-info/?include_episodes=true`
+        `${host}/api/vod/series/${seriesId}/provider-info/?${params}`
       );
       return response;
     } catch (e) {
@@ -3815,6 +3886,85 @@ export default class API {
       );
     } catch (e) {
       errorNotification('Failed to fetch connect logs', e);
+    }
+  }
+
+  static async getSDLineups(sourceId) {
+    try {
+      const response = await request(
+        `${host}/api/epg/sources/${sourceId}/sd-lineups/`
+      );
+      return response;
+    } catch (e) {
+      errorNotification('Failed to retrieve Schedules Direct lineups', e);
+    }
+  }
+
+  static async addSDLineup(sourceId, lineup) {
+    try {
+      const response = await request(
+        `${host}/api/epg/sources/${sourceId}/sd-lineups/`,
+        {
+          method: 'POST',
+          body: { lineup },
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to add lineup ${lineup}`, e);
+    }
+  }
+
+  static async deleteSDLineup(sourceId, lineup) {
+    try {
+      const response = await request(
+        `${host}/api/epg/sources/${sourceId}/sd-lineups/`,
+        {
+          method: 'DELETE',
+          body: { lineup },
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification(`Failed to remove lineup ${lineup}`, e);
+    }
+  }
+
+  static async updateEpgSourceSettings(sourceId, settings) {
+    try {
+      // Read current custom_properties from the store to merge, not replace
+      const epgs = useEPGsStore.getState().epgs;
+      const source = epgs[sourceId];
+      const cp = { ...(source?.custom_properties || {}), ...settings };
+
+      const response = await request(`${host}/api/epg/sources/${sourceId}/`, {
+        method: 'PATCH',
+        body: { custom_properties: cp },
+      });
+
+      useEPGsStore.getState().updateEPG(response);
+      return response;
+    } catch (e) {
+      errorNotification('Failed to update EPG source settings', e);
+    }
+  }
+
+  static async updateSDSettings(sourceId, settings) {
+    return API.updateEpgSourceSettings(sourceId, settings);
+  }
+
+  static async searchSDLineups(sourceId, country, postalcode) {
+    try {
+      const response = await request(
+        `${host}/api/epg/sources/${sourceId}/sd-lineups/search/`,
+        {
+          method: 'POST',
+          body: { country, postalcode },
+        }
+      );
+      return response;
+    } catch (e) {
+      errorNotification('Failed to search Schedules Direct lineups', e);
     }
   }
 }
