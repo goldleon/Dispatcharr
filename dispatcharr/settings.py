@@ -85,7 +85,8 @@ if os.environ.get("DISPATCHARR_DEBUG", "False").lower() == "true":
 else:
     DEBUG = False
 
-ALLOWED_HOSTS = ["*"]
+_allowed_hosts_env = os.environ.get("DISPATCHARR_ALLOWED_HOSTS", "*")
+ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_env.split(",") if h.strip()] if _allowed_hosts_env != "*" else ["*"]
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 INSTALLED_APPS = [

@@ -10,8 +10,6 @@ import random
 import re
 import requests
 import requests.exceptions
-import pickle
-import base64
 import os
 import socket
 import mimetypes

@@ -4,6 +4,8 @@ import logging
 import regex
 from typing import Optional, Tuple, List
 from django.shortcuts import get_object_or_404
+from django.core.exceptions import ValidationError
+from django.http import Http404
 from apps.channels.models import Channel, Stream
 from apps.m3u.models import M3UAccount, M3UAccountProfile
 from apps.m3u.connection_pool import (
@@ -51,8 +53,8 @@ def get_stream_object(id: str):
     try:
         logger.info(f"Fetching channel ID {id}")
         return get_object_or_404(Channel, uuid=id)
-    except:
-        # UUID check failed, assume stream hash
+    except (ValidationError, ValueError, Http404):
+        # UUID check failed or channel not found, assume stream hash
         logger.info(f"Fetching stream hash {id}")
         return get_object_or_404(Stream, stream_hash=id)
 
