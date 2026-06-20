@@ -272,6 +272,16 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator",
     },
+    {
+        "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {"min_length": 8},
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
+    },
+    {
+        "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
+    },
 ]
 
 REST_FRAMEWORK = {
@@ -429,8 +439,19 @@ BACKUP_DATA_DIRS = [
 
 SERVER_IP = "127.0.0.1"
 
-CORS_ALLOW_ALL_ORIGINS = True
-CSRF_TRUSTED_ORIGINS = ["http://*", "https://*"]
+# CORS / CSRF configuration — configurable via environment variables.
+# For stricter security, set DISPATCHARR_CORS_ORIGINS to a comma-separated
+# list of allowed origins (e.g. "https://my.domain.com,http://localhost:3000").
+# Defaults to allowing all origins for backward compatibility with self-hosted
+# deployments where the hostname is unknown at build time.
+_cors_origins = os.environ.get("DISPATCHARR_CORS_ORIGINS", "").strip()
+if _cors_origins and _cors_origins != "*":
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+    CSRF_TRUSTED_ORIGINS = CORS_ALLOWED_ORIGINS
+else:
+    CORS_ALLOW_ALL_ORIGINS = True
+    CSRF_TRUSTED_ORIGINS = ["http://*", "https://*"]
 APPEND_SLASH = True
 
 SIMPLE_JWT = {

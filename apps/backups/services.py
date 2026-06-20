@@ -293,9 +293,16 @@ def restore_backup(backup_file: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="dispatcharr-restore-") as temp_dir:
         temp_path = Path(temp_dir)
 
-        # Extract backup
+        # Extract backup — with ZIP Slip protection
         logger.debug("Extracting backup archive...")
         with ZipFile(backup_file, "r") as zip_file:
+            for entry in zip_file.namelist():
+                # Resolve the target path and verify it stays within temp_path
+                target = (temp_path / entry).resolve()
+                if not target.is_relative_to(temp_path.resolve()):
+                    raise ValueError(
+                        f"Malicious ZIP entry detected (path traversal): {entry}"
+                    )
             zip_file.extractall(temp_path)
 
         # Read metadata
@@ -355,7 +362,11 @@ def list_backups() -> list[dict]:
 def delete_backup(filename: str) -> None:
     """Delete a backup file."""
     backup_dir = get_backup_dir()
-    backup_file = backup_dir / filename
+    backup_file = (backup_dir / filename).resolve()
+
+    # Prevent path traversal — ensure resolved path is inside backup_dir
+    if not backup_file.is_relative_to(backup_dir.resolve()):
+        raise ValueError(f"Invalid backup filename: {filename}")
 
     if not backup_file.exists():
         raise FileNotFoundError(f"Backup file not found: {filename}")
