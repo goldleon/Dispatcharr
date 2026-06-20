@@ -51,14 +51,14 @@ class UserSerializer(serializers.ModelSerializer):
     channel_profiles = serializers.PrimaryKeyRelatedField(
         queryset=ChannelProfile.objects.all(), many=True, required=False
     )
-    api_key = serializers.CharField(read_only=True, allow_null=True)
+    has_api_key = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             "id",
             "username",
-            "api_key",
+            "has_api_key",
             "email",
             "user_level",
             "password",
@@ -73,6 +73,9 @@ class UserSerializer(serializers.ModelSerializer):
             "first_name",
             "last_name",
         ]
+
+    def get_has_api_key(self, obj):
+        return bool(obj.api_key)
 
     def validate_custom_properties(self, value):
         """Validate custom_properties structure and size."""

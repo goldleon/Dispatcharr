@@ -305,7 +305,7 @@ class APIKeyViewSet(viewsets.ViewSet):
 
     def list(self, request):
         user = request.user
-        return Response({"key": user.api_key})
+        return Response({"has_key": bool(user.api_key)})
 
     @action(detail=False, methods=["post"], url_path="generate")
     def generate(self, request):
@@ -324,8 +324,8 @@ class APIKeyViewSet(viewsets.ViewSet):
                 return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
         raw = secrets.token_urlsafe(40)
-        target_user.api_key = raw
-        target_user.save(update_fields=["api_key"])
+        target_user.set_api_key(raw)
+        target_user.save(update_fields=["api_key", "api_key_prefix"])
 
         user_data = UserSerializer(target_user).data
         return Response({"key": raw, "user": user_data}, status=status.HTTP_201_CREATED)
@@ -347,7 +347,8 @@ class APIKeyViewSet(viewsets.ViewSet):
                 return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
 
         target_user.api_key = None
-        target_user.save(update_fields=["api_key"])
+        target_user.api_key_prefix = None
+        target_user.save(update_fields=["api_key", "api_key_prefix"])
 
         return Response({"success": True})
 

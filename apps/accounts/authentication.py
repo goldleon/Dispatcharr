@@ -71,12 +71,17 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
         if not raw_key:
             return None
 
-        if not raw_key:
-            return None
+        # Two-step lookup: fast indexed query by prefix, then constant-time
+        # hash verification. Avoids storing plaintext keys in the database.
+        prefix = raw_key[:8]
+        candidates = User.objects.filter(api_key_prefix=prefix)
+        user = None
+        for candidate in candidates:
+            if candidate.verify_api_key(raw_key):
+                user = candidate
+                break
 
-        try:
-            user = User.objects.get(api_key=raw_key)
-        except User.DoesNotExist:
+        if user is None:
             raise exceptions.AuthenticationFailed("Invalid API key")
 
         if not user.is_active:

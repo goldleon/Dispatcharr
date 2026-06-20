@@ -1,6 +1,6 @@
 # connect/utils.py
 import logging
-from django.template import Template, Context
+import string
 from .models import EventSubscription, DeliveryLog, SUPPORTED_EVENTS
 from .handlers.webhook import WebhookHandler
 from .handlers.script import ScriptHandler
@@ -12,6 +12,29 @@ HANDLERS = {
     "webhook": WebhookHandler,
     "script": ScriptHandler,
 }
+
+
+def _safe_render_template(template_str, payload):
+    """Render a payload template using Python's string.Template (safe_substitute).
+
+    This deliberately avoids Django's Template engine which exposes settings,
+    model methods, and ORM traversal via {{ }} tags — a Server-Side Template
+    Injection (SSTI) vector.
+
+    string.Template only supports $variable and ${variable} substitution with
+    no attribute access, method calls, or tag loading. safe_substitute() leaves
+    unresolved placeholders intact instead of raising errors.
+    """
+    flat_payload = {}
+    for k, v in (payload or {}).items():
+        # Only expose scalar values; skip nested dicts/lists to prevent
+        # accidental information leakage of complex objects.
+        if isinstance(v, (str, int, float, bool)):
+            flat_payload[str(k)] = str(v)
+        elif v is None:
+            flat_payload[str(k)] = ""
+    tmpl = string.Template(template_str)
+    return tmpl.safe_substitute(flat_payload)
 
 
 def trigger_event(event_name, payload):
@@ -39,13 +62,14 @@ def trigger_event(event_name, payload):
             continue
 
         # apply optional payload template (only for webhook integrations)
-        # If the rendered template is valid JSON, use that object as the payload.
-        # Otherwise, pass the rendered string as-is.
+        # Uses safe string.Template substitution — NOT Django's Template engine
+        # which would allow SSTI via {{ settings.SECRET_KEY }} etc.
         final_payload = payload
         if integration.type == 'webhook' and sub.payload_template:
             try:
-                template = Template(sub.payload_template)
-                final_payload = template.render(Context(payload)).strip()
+                final_payload = _safe_render_template(
+                    sub.payload_template, payload
+                )
             except Exception as e:
                 logger.error(
                     f"Payload template render failed for subscription id={sub.id}: {e}"
