@@ -95,7 +95,7 @@ services:
   # Celery Service - Background task worker
   # ============================================================================
   celery:
-    image: ghcr.io/dispatcharr/dispatcharr:latest
+    image: dispatcharr:latest
     container_name: dispatcharr_celery
     restart: unless-stopped
     depends_on:
