@@ -24,16 +24,16 @@ logger = get_logger()
 
 
 def create_fmp4_stream_generator(channel_id, client_id, client_ip, client_user_agent,
-                                  channel_initializing=False, user=None, fmt='fmp4'):
+                                  channel_initializing=False, user=None, fmt='fmp4', channel_name=None):
     gen = FMP4StreamGenerator(channel_id, client_id, client_ip, client_user_agent,
-                               channel_initializing, user, fmt=fmt)
+                               channel_initializing, user, fmt=fmt, channel_name=channel_name)
     return gen.generate
 
 
 class FMP4StreamGenerator:
 
     def __init__(self, channel_id, client_id, client_ip, client_user_agent,
-                 channel_initializing=False, user=None, fmt='fmp4'):
+                 channel_initializing=False, user=None, fmt='fmp4', channel_name=None):
         self.channel_id = channel_id
         self.client_id = client_id
         self.client_ip = client_ip
@@ -42,11 +42,14 @@ class FMP4StreamGenerator:
         self.user = user
         self.fmt = fmt
 
-        try:
-            _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
-            self.channel_name = _name if _name else str(channel_id)
-        except Exception:
-            self.channel_name = str(channel_id)
+        if channel_name:
+            self.channel_name = channel_name
+        else:
+            try:
+                _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+                self.channel_name = _name if _name else str(channel_id)
+            except Exception:
+                self.channel_name = str(channel_id)
 
         self.stream_start_time = time.time()
         self.bytes_sent = 0

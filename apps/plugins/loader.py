@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 import threading
 import types
 from dataclasses import dataclass, field
@@ -54,6 +55,9 @@ class PluginManager:
         self._alias_names: Dict[str, str] = {}
         self._reload_token_path = os.path.join(self.plugins_dir, ".reload_token")
         self._last_reload_token = 0.0
+        self._last_token_check_time = 0.0
+        self._token_check_interval = 10.0  # Check reload token at most once every 10 seconds
+        self._cached_token = 0.0
         self._discovery_completed = False
         self._lock = threading.RLock()
 
@@ -69,6 +73,8 @@ class PluginManager:
         force_reload: bool = False,
         use_cache: bool = False,
     ) -> Dict[str, LoadedPlugin]:
+        if force_reload:
+            self._last_token_check_time = 0.0
         token = self._get_reload_token()
         if use_cache and not force_reload:
             with self._lock:
@@ -799,15 +805,23 @@ class PluginManager:
         return module
 
     def _get_reload_token(self) -> float:
+        now = time.time()
+        if now - self._last_token_check_time < self._token_check_interval:
+            return self._cached_token
         try:
-            return os.path.getmtime(self._reload_token_path)
+            self._cached_token = os.path.getmtime(self._reload_token_path)
+            self._last_token_check_time = now
+            return self._cached_token
         except FileNotFoundError:
+            self._cached_token = 0.0
+            self._last_token_check_time = now
             return 0.0
         except Exception:
             return 0.0
 
     def _touch_reload_token(self) -> None:
         try:
+            self._last_token_check_time = 0.0
             os.makedirs(self.plugins_dir, exist_ok=True)
             with open(self._reload_token_path, "a", encoding="utf-8"):
                 pass

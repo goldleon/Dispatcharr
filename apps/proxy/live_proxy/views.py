@@ -619,12 +619,13 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
             )
             generate = create_fmp4_stream_generator(
                 channel_id, client_id, client_ip, client_user_agent, channel_initializing, user=user,
-                fmt=resolved_format,
+                fmt=resolved_format, channel_name=channel.name
             )
             content_type = "video/mp4"
         else:
             generate = create_stream_generator(
-                channel_id, client_id, client_ip, client_user_agent, channel_initializing, user=user, buffer=source_buffer
+                channel_id, client_id, client_ip, client_user_agent, channel_initializing, user=user, buffer=source_buffer,
+                channel_name=channel.name
             )
             content_type = "video/mp2t"
 

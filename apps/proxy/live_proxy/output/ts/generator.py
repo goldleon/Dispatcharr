@@ -22,7 +22,7 @@ class StreamGenerator:
     data delivery, and cleanup.
     """
 
-    def __init__(self, channel_id, client_id, client_ip, client_user_agent, channel_initializing=False, user=None, buffer=None):
+    def __init__(self, channel_id, client_id, client_ip, client_user_agent, channel_initializing=False, user=None, buffer=None, channel_name=None):
         """
         Initialize the stream generator with client and channel details.
 
@@ -35,6 +35,7 @@ class StreamGenerator:
             user: Authenticated user making the request
             buffer: Source StreamBuffer to read from. Resolved via ProxyServer.get_buffer()
                     before construction; passed in so the generator is buffer-agnostic.
+            channel_name: Optional pre-resolved name of the channel
         """
         self.channel_id = channel_id
         self.client_id = client_id
@@ -43,12 +44,15 @@ class StreamGenerator:
         self.channel_initializing = channel_initializing
         self.user = user
         self._source_buffer = buffer
-        # Cache channel name once to avoid repeated DB queries for logging
-        try:
-            _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
-            self.channel_name = _name if _name else str(channel_id)
-        except Exception:
-            self.channel_name = str(channel_id)
+        if channel_name:
+            self.channel_name = channel_name
+        else:
+            # Cache channel name once to avoid repeated DB queries for logging
+            try:
+                _name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
+                self.channel_name = _name if _name else str(channel_id)
+            except Exception:
+                self.channel_name = str(channel_id)
 
         # Performance and state tracking
         self.stream_start_time = time.time()
@@ -667,10 +671,10 @@ class StreamGenerator:
                 logger.error(f"Could not log client disconnect event: {e}")
 
 
-def create_stream_generator(channel_id, client_id, client_ip, client_user_agent, channel_initializing=False, user=None, buffer=None):
+def create_stream_generator(channel_id, client_id, client_ip, client_user_agent, channel_initializing=False, user=None, buffer=None, channel_name=None):
     """
     Factory function to create a new stream generator.
     Returns a function that can be passed to StreamingHttpResponse.
     """
-    generator = StreamGenerator(channel_id, client_id, client_ip, client_user_agent, channel_initializing, user=user, buffer=buffer)
+    generator = StreamGenerator(channel_id, client_id, client_ip, client_user_agent, channel_initializing, user=user, buffer=buffer, channel_name=channel_name)
     return generator.generate
