@@ -135,9 +135,26 @@ class StreamProfile(models.Model):
         return False
 
     def build_command(self, stream_url, user_agent):
-
         if self.is_proxy():
             return []
+
+        # Validate stream_url to prevent command argument injection or SSRF using arbitrary protocols
+        from urllib.parse import urlparse
+        if not stream_url:
+            raise ValidationError("Stream URL cannot be empty.")
+        
+        # Check for control characters or shell metacharacters
+        if any(c in stream_url for c in "\r\n\t;`$\"'"):
+            raise ValidationError("Stream URL contains invalid characters.")
+
+        # Ensure it does not start with a hyphen to prevent flag injection
+        if stream_url.strip().startswith('-'):
+            raise ValidationError("Stream URL cannot start with a hyphen.")
+
+        parsed_url = urlparse(stream_url)
+        allowed_schemes = {'http', 'https', 'rtsp', 'rtp', 'udp', 'rtmp'}
+        if parsed_url.scheme.lower() not in allowed_schemes:
+            raise ValidationError(f"Protocol scheme '{parsed_url.scheme}' is not allowed for stream profiles.")
 
         replacements = {
             "{streamUrl}": stream_url,

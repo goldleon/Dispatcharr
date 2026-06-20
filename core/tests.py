@@ -301,3 +301,68 @@ class DropDBCommandTlsTest(TestCase):
             host='localhost', port=5432,
             autocommit=True,
         )
+
+
+class EpgParserSecurityTests(TestCase):
+    def test_parse_html_entities_resolved(self):
+        from apps.epg.tasks import _parse_programme_element
+        # A simple programme element containing &eacute;
+        xml_bytes = b'<programme start="20260620120000" stop="20260620130000" channel="test"><title>Caf&amp;eacute; Caf&amp;eacute;</title></programme>'
+        # Wait, since our regex replaces "&eacute;" we should write it as "&eacute;" or escaped &amp;eacute; depending on test.
+        # Let's test with raw "&eacute;" directly:
+        xml_bytes_raw = b'<programme start="20260620120000" stop="20260620130000" channel="test"><title>Caf&eacute; Caf&eacute;</title></programme>'
+        element = _parse_programme_element(xml_bytes_raw)
+        title_element = element.find('title')
+        self.assertEqual(title_element.text, 'Caf\u00e9 Caf\u00e9')
+
+    def test_billion_laughs_protection(self):
+        from apps.epg.tasks import _parse_programme_element
+        from lxml import etree
+        # XML containing a Billion Laughs recursive entity definition within the bytes.
+        # Note: If resolve_entities is False, it will either raise XMLSyntaxError because of 
+        # the entity references, or parse it as plain unexpanded text.
+        xml_bytes = (
+            b'<!DOCTYPE programme [\n'
+            b'<!ENTITY lol "lol">\n'
+            b'<!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">\n'
+            b']>\n'
+            b'<programme start="20260620120000" stop="20260620130000" channel="test">\n'
+            b'  <title>&lol1;</title>\n'
+            b'</programme>'
+        )
+        try:
+            element = _parse_programme_element(xml_bytes)
+            title_element = element.find('title')
+            self.assertNotEqual(title_element.text, 'lol' * 10)
+        except etree.XMLSyntaxError:
+            # Raising syntax error due to unresolved entity reference is a safe outcome
+            pass
+
+
+class StreamProfileSecurityTests(TestCase):
+    def setUp(self):
+        from core.models import StreamProfile
+        self.profile = StreamProfile.objects.create(
+            name="Test Custom Profile",
+            command="ffmpeg",
+            parameters="-i {streamUrl} -c copy -f mpegts pipe:1"
+        )
+
+    def test_build_command_success(self):
+        cmd = self.profile.build_command("http://provider.com/live.ts", "Mozilla/5.0")
+        self.assertEqual(cmd, ["ffmpeg", "-i", "http://provider.com/live.ts", "-c", "copy", "-f", "mpegts", "pipe:1"])
+
+    def test_build_command_rejects_hyphen_url(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            self.profile.build_command("-option_injection", "Mozilla/5.0")
+
+    def test_build_command_rejects_unapproved_protocol(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            self.profile.build_command("file:///etc/passwd", "Mozilla/5.0")
+
+    def test_build_command_rejects_control_characters(self):
+        from django.core.exceptions import ValidationError
+        with self.assertRaises(ValidationError):
+            self.profile.build_command("http://provider.com/live.ts\n;rm -rf /", "Mozilla/5.0")

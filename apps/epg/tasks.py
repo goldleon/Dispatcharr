@@ -273,6 +273,19 @@ def _sd_pick_poster_url(images, poster_style=SD_POSTER_STYLE_DEFAULT):
 # The 5 XML-predefined entities (amp, lt, gt, quot, apos) are always
 # recognised by the XML spec and must not be redeclared.
 _XML_ENTITIES = frozenset({'amp', 'lt', 'gt', 'quot', 'apos'})
+_XML_ENTITIES_BYTES = frozenset({b'amp', b'lt', b'gt', b'quot', b'apos'})
+_HTML_ENTITY_RE = re.compile(b'&([a-zA-Z0-9]+);')
+
+
+def _replace_html_entities_bytes(match):
+    name = match.group(1)
+    if name in _XML_ENTITIES_BYTES:
+        return match.group(0)
+    name_str = name.decode('ascii', errors='ignore')
+    codepoint = html.entities.name2codepoint.get(name_str)
+    if codepoint is not None:
+        return f'&#{codepoint};'.encode('ascii')
+    return match.group(0)
 
 
 def _build_html_entity_doctype() -> bytes:
@@ -290,10 +303,11 @@ _HTML_ENTITY_DOCTYPE = _build_html_entity_doctype()
 
 
 def _parse_programme_element(element_bytes):
-    """Parse a single <programme> element, prepending the HTML-entity DOCTYPE
-    so references like &eacute; in the text resolve instead of failing."""
-    parser = etree.XMLParser(resolve_entities=True, load_dtd=True, no_network=True)
-    return etree.fromstring(_HTML_ENTITY_DOCTYPE + element_bytes, parser)
+    """Parse a single <programme> element, converting HTML named entities to
+    numeric character references to ensure safe parsing without DTD loading or entity resolution."""
+    sanitized_bytes = _HTML_ENTITY_RE.sub(_replace_html_entities_bytes, element_bytes)
+    parser = etree.XMLParser(resolve_entities=False, load_dtd=False, no_network=True)
+    return etree.fromstring(sanitized_bytes, parser)
 
 
 class _PrependStream:
