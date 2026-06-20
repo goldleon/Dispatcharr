@@ -28,6 +28,7 @@ from core.utils import (
     TaskLockRenewer,
     natural_sort_key,
     log_system_event,
+    cleanup_memory,
 )
 from core.models import CoreSettings, UserAgent
 from asgiref.sync import async_to_sync
@@ -884,7 +885,7 @@ def collect_xc_streams(account_id, enabled_groups):
 
             # Drop the full provider catalog before returning; only filtered rows are needed.
             del all_xc_streams
-            gc.collect()
+            cleanup_memory()
 
     except Exception as e:
         logger.error(f"Failed to fetch XC streams: {str(e)}")
@@ -1090,7 +1091,7 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
 
     # Aggressive garbage collection
     del streams_to_create, streams_to_update, stream_hashes, existing_streams
-    gc.collect()
+    cleanup_memory()
 
     return retval
 
@@ -1330,7 +1331,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys):
 
     # Free batch data structures (reference-counted deallocation)
     del streams_to_create, streams_to_update, stream_hashes, existing_streams
-    gc.collect()
+    cleanup_memory()
 
     return retval
 

@@ -431,7 +431,7 @@ def send_epg_update(source_id, action, progress, **kwargs):
     # For high-frequency parsing, occasionally force additional garbage collection
     # to prevent memory buildup
     if action == "parsing_programs" and progress % 50 == 0:
-        gc.collect()
+        cleanup_memory()
 
 
 def delete_epg_refresh_task_by_id(epg_id):
@@ -499,7 +499,7 @@ def refresh_all_epg_data():
     for source in active_sources:
         refresh_epg_data(source.id)
         # Force garbage collection between sources
-        gc.collect()
+        cleanup_memory()
 
     logger.info("Finished refresh_epg_data task.")
     return "EPG data refreshed."
@@ -533,7 +533,7 @@ def refresh_epg_data(source_id, force=False):
             lock_renewer.stop()
             release_task_lock('refresh_epg_data', source_id)
             # Force garbage collection before exit
-            gc.collect()
+            cleanup_memory()
             return f"EPG source {source_id} does not exist, task cleaned up"
 
         # The source exists but is not active, just skip processing
@@ -542,7 +542,7 @@ def refresh_epg_data(source_id, force=False):
             lock_renewer.stop()
             release_task_lock('refresh_epg_data', source_id)
             # Force garbage collection before exit
-            gc.collect()
+            cleanup_memory()
             return
 
         # Skip refresh for dummy EPG sources - they don't need refreshing
@@ -550,7 +550,7 @@ def refresh_epg_data(source_id, force=False):
             logger.info(f"Skipping refresh for dummy EPG source {source.name} (ID: {source_id})")
             lock_renewer.stop()
             release_task_lock('refresh_epg_data', source_id)
-            gc.collect()
+            cleanup_memory()
             return
 
         # Continue with the normal processing...
@@ -565,7 +565,7 @@ def refresh_epg_data(source_id, force=False):
                 lock_renewer.stop()
                 release_task_lock('refresh_epg_data', source_id)
                 # Force garbage collection before exit
-                gc.collect()
+                cleanup_memory()
                 return
 
             parse_channels_success = parse_channels_only(source)
@@ -574,7 +574,7 @@ def refresh_epg_data(source_id, force=False):
                 lock_renewer.stop()
                 release_task_lock('refresh_epg_data', source_id)
                 # Force garbage collection before exit
-                gc.collect()
+                cleanup_memory()
                 return
 
             # Build byte-offset index after programme data is committed so refresh
@@ -612,7 +612,7 @@ def refresh_epg_data(source_id, force=False):
         # Clear references to ensure proper garbage collection
         source = None
         # Force garbage collection before releasing the lock
-        gc.collect()
+        cleanup_memory()
         connection.close()
         lock_renewer.stop()
         release_task_lock('refresh_epg_data', source_id)
@@ -1830,9 +1830,9 @@ def parse_programs_for_tvg_id(epg_id, force=False):
                             ProgramData.objects.bulk_create(programs_to_create)
                             logger.debug(f"Saved batch of {len(programs_to_create)} programs for {epg.tvg_id}")
                             programs_to_create = []
-                            # Only call gc.collect() every few batches
+                            # Only call cleanup_memory() every few batches
                             if programs_processed % (batch_size * 5) == 0:
-                                gc.collect()
+                                cleanup_memory()
 
                     except Exception as e:
                         logger.error(f"Error processing program for {epg.tvg_id}: {e}", exc_info=True)
@@ -1850,7 +1850,7 @@ def parse_programs_for_tvg_id(epg_id, force=False):
             if program_parser:
                 program_parser = None
 
-            gc.collect()
+            cleanup_memory()
 
         except zipfile.BadZipFile as zip_error:
             logger.error(f"Bad ZIP file: {zip_error}")
@@ -2312,7 +2312,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
                             )
 
                         if total_programs % 5000 == 0:
-                            gc.collect()
+                            cleanup_memory()
 
                     except Exception as e:
                         logger.error(f"Error processing program for {channel_id}: {e}", exc_info=True)
@@ -2382,7 +2382,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
                     _clear_epg_program_staging_table()
                 except Exception:
                     pass
-            gc.collect()
+            cleanup_memory()
 
         # Count channels that actually got programs
         channels_with_programs = sum(1 for count in programs_by_channel.values() if count > 0)
@@ -2448,7 +2448,7 @@ def parse_programs_for_source(epg_source, tvg_id=None):
         mapped_epg_ids = None
         mapped_tvg_ids = None
         tvg_id_to_epg_id = None
-        gc.collect()
+        cleanup_memory()
 
         # Add comprehensive memory cleanup at the end
         cleanup_memory(log_usage=should_log_memory, force_collection=True)
@@ -3250,7 +3250,7 @@ def fetch_schedules_direct(
             EPGData.objects.bulk_update(epgs_to_update, ['name', 'icon_url'])
             logger.info(f"Updated {len(epgs_to_update)} existing EPGData entries.")
 
-        gc.collect()
+        cleanup_memory()
 
         # Rebuild map with fresh DB ids for all stations
         epg_id_map = {
@@ -3652,7 +3652,7 @@ def fetch_schedules_direct(
         logger.info("All program metadata unchanged - skipping program download.")
         send_epg_update(source.id, "parsing_programs", 80, message="Program metadata unchanged - using cached data.")
 
-    gc.collect()
+    cleanup_memory()
 
     # -------------------------------------------------------------------------
     # Step 7: Build ProgramData records and persist atomically
@@ -3999,7 +3999,7 @@ def fetch_schedules_direct(
         return
     finally:
         all_programs_to_create = None
-        gc.collect()
+        cleanup_memory()
 
     # -------------------------------------------------------------------------
     # Step 8–9: Posters, logo auto-apply, and pruning

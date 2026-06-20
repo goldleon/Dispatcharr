@@ -538,6 +538,19 @@ def cleanup_memory(log_usage=False, force_collection=True):
         gc.collect(generation=2)
         # Clear cyclic references
         gc.collect(generation=0)
+        
+        # Try to release memory back to the OS using malloc_trim if on Linux/glibc
+        try:
+            import ctypes
+            try:
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except (OSError, AttributeError):
+                # Try fallback for systems where libc.so.6 is not directly loadable by name
+                libc = ctypes.CDLL(None)
+                libc.malloc_trim(0)
+        except Exception:
+            pass
 
     if log_usage:
         try:
