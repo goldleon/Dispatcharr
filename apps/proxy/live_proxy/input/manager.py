@@ -1272,6 +1272,21 @@ class StreamManager:
             # Only update Redis periodically to reduce overhead
             now = time.time()
             if now - self.last_bytes_update >= self.bytes_update_interval:
+                duration = now - self.last_bytes_update
+                if duration > 0:
+                    bitrate_bps = (self.bytes_processed * 8) / duration
+                    # Dynamically scale chunk sizes: 128KB for >5 Mbps, 64KB otherwise
+                    # 128KB = 188 * 680 = 127840 bytes
+                    # 64KB = 188 * 340 = 63920 bytes
+                    if bitrate_bps > 5000000:
+                        new_target = 188 * 680
+                    else:
+                        new_target = 188 * 340
+                        
+                    if hasattr(self.buffer, 'target_chunk_size'):
+                        self.buffer.target_chunk_size = new_target
+                        logger.debug(f"Dynamic chunk size for channel {self.channel_id} scaled to {new_target} bytes (bitrate: {bitrate_bps/1000000:.2f} Mbps)")
+
                 if hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
                     # Update channel metadata with total bytes
                     metadata_key = RedisKeys.channel_metadata(self.channel_id)
@@ -1837,11 +1852,7 @@ class StreamManager:
             # Add directly to buffer without TS-specific processing
             success = self.buffer.add_chunk(chunk)
 
-            if success and hasattr(self.buffer, 'redis_client') and self.buffer.redis_client:
-                last_data_key = RedisKeys.last_data(self.buffer.channel_id)
-                self.buffer.redis_client.set(last_data_key, str(time.time()), ex=60)
-
-            return True
+            return success
 
         except (socket.timeout, socket.error) as e:
             # Socket error

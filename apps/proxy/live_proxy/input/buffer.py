@@ -115,6 +115,10 @@ class StreamBuffer:
                             pipe.zremrangebyscore(self.chunk_timestamps_key, '-inf', now - self.chunk_ttl)
                             pipe.expire(self.chunk_timestamps_key, self.chunk_ttl)
 
+                        if self.channel_id:
+                            last_data_key = RedisKeys.last_data(self.channel_id)
+                            pipe.setex(last_data_key, 60, str(time.time()))
+
                         pipe.execute()
 
                         # Update local tracking
