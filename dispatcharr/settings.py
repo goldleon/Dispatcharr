@@ -22,6 +22,24 @@ def _validate_tls_cert_paths(paths, service_name):
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY")
+if not SECRET_KEY:
+    # Auto-generate and persist a SECRET_KEY for self-hosted deployments
+    # where users don't set DJANGO_SECRET_KEY. The key is stored in the data
+    # volume so it survives container restarts.
+    _key_file = Path(os.environ.get("DATA_DIR", "/data")) / ".secret_key"
+    try:
+        if _key_file.exists():
+            SECRET_KEY = _key_file.read_text().strip()
+        if not SECRET_KEY:
+            import secrets as _secrets
+            SECRET_KEY = _secrets.token_urlsafe(64)
+            _key_file.parent.mkdir(parents=True, exist_ok=True)
+            _key_file.write_text(SECRET_KEY)
+            _key_file.chmod(0o600)
+    except OSError:
+        # Fallback for read-only filesystems (tests, CI)
+        import secrets as _secrets
+        SECRET_KEY = _secrets.token_urlsafe(64)
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_DB = os.environ.get("REDIS_DB", "0")
@@ -452,6 +470,19 @@ if _cors_origins and _cors_origins != "*":
 else:
     CORS_ALLOW_ALL_ORIGINS = True
     CSRF_TRUSTED_ORIGINS = ["http://*", "https://*"]
+
+# Session and CSRF cookie security
+# Enable Secure flag when running behind a TLS-terminating reverse proxy.
+_use_https = os.environ.get("DISPATCHARR_HTTPS", "").lower() in ("true", "1", "yes")
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SAMESITE = "Lax"
+if _use_https:
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
 APPEND_SLASH = True
 
 SIMPLE_JWT = {

@@ -34,8 +34,8 @@ class TokenObtainPairView(TokenObtainPairView):
             from core.utils import log_system_event
             username = request.data.get("username", 'unknown')
             client_ip = request.META.get('REMOTE_ADDR', 'unknown')
-            user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
-            logger.info(f"Login blocked by network policy: user={username} ip={client_ip} ua={user_agent}")
+            user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')[:80]
+            logger.info(f"Login blocked by network policy: user={username} ip={client_ip}")
             log_system_event(
                 event_type='login_failed',
                 user=username,
@@ -51,7 +51,7 @@ class TokenObtainPairView(TokenObtainPairView):
         # Log login attempt
         from core.utils import log_system_event
         client_ip = request.META.get('REMOTE_ADDR', 'unknown')
-        user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
+        user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')[:80]
 
         try:
             logger.debug(f"Attempting JWT login for user={username}")
@@ -109,8 +109,8 @@ class TokenRefreshView(TokenRefreshView):
             # Log blocked token refresh attempt due to network restrictions
             from core.utils import log_system_event
             client_ip = request.META.get('REMOTE_ADDR', 'unknown')
-            user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
-            logger.info(f"Token refresh blocked by network policy: ip={client_ip} ua={user_agent}")
+            user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')[:80]
+            logger.info(f"Token refresh blocked by network policy: ip={client_ip}")
             log_system_event(
                 event_type='login_failed',
                 user='token_refresh',
@@ -187,7 +187,7 @@ class AuthViewSet(viewsets.ViewSet):
         from core.utils import log_system_event
         username = request.user.username if request.user and request.user.is_authenticated else 'unknown'
         client_ip = request.META.get('REMOTE_ADDR', 'unknown')
-        user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')
+        user_agent = request.META.get('HTTP_USER_AGENT', 'unknown')[:80]
 
         log_system_event(
             event_type='logout',
