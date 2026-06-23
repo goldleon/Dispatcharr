@@ -2218,6 +2218,11 @@ def xc_get_live_categories(user):
 def _xc_live_streams_setup(request, user, category_id):
     from apps.channels.managers import with_effective_values
 
+    if category_id is not None:
+        category_str = str(category_id)
+        if category_str in ('*', '0', 'all') or not category_str.isdigit():
+            category_id = None
+
     if not is_admin_user(user):
         user_profile_count = user.channel_profiles.count()
 
@@ -2355,7 +2360,7 @@ def xc_get_epg(request, user, short=False):
     from apps.channels.managers import with_effective_values
 
     channel_id = request.GET.get('stream_id')
-    if not channel_id:
+    if not channel_id or not str(channel_id).isdigit():
         raise Http404()
 
     channel = None
@@ -2573,6 +2578,11 @@ def xc_get_vod_streams(request, user, category_id=None):
     from apps.vod.models import M3UMovieRelation
     from django.db import connection
 
+    if category_id is not None:
+        category_str = str(category_id)
+        if category_str in ('*', '0', 'all') or not category_str.isdigit():
+            category_id = None
+
     rel_filters = {"m3u_account__is_active": True}
     if category_id:
         rel_filters["category_id"] = category_id
@@ -2677,6 +2687,11 @@ def xc_get_series(request, user, category_id=None):
     """Get series list for XtreamCodes API"""
     from apps.vod.models import M3USeriesRelation
     from django.db import connection
+
+    if category_id is not None:
+        category_str = str(category_id)
+        if category_str in ('*', '0', 'all') or not category_str.isdigit():
+            category_id = None
 
     rel_filters = {"m3u_account__is_active": True}
     if category_id:

@@ -1,9 +1,15 @@
-from django.test import TestCase, Client
+from django.test import TestCase, Client, override_settings
 from django.urls import reverse
 from apps.channels.models import Channel, ChannelGroup
 from apps.epg.models import EPGData, EPGSource
+from apps.accounts.models import User
 import xml.etree.ElementTree as ET
 
+@override_settings(CACHES={
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    }
+})
 class OutputM3UTest(TestCase):
     def setUp(self):
         self.client = Client()
@@ -12,7 +18,7 @@ class OutputM3UTest(TestCase):
         """
         Test that the M3U endpoint returns a valid M3U file.
         """
-        url = reverse('output:generate_m3u')
+        url = reverse('output:m3u_endpoint')
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
         content = response.content.decode()
@@ -22,7 +28,7 @@ class OutputM3UTest(TestCase):
         """
         Test that a POST request with an empty body returns 200 OK.
         """
-        url = reverse('output:generate_m3u')
+        url = reverse('output:m3u_endpoint')
 
         response = self.client.post(url, data=None, content_type='application/x-www-form-urlencoded')
         content = response.content.decode()
@@ -34,7 +40,7 @@ class OutputM3UTest(TestCase):
         """
         Test that a POST request with a non-empty body returns 403 Forbidden.
         """
-        url = reverse('output:generate_m3u')
+        url = reverse('output:m3u_endpoint')
 
         response = self.client.post(url, data={'evilstring': 'muhahaha'})
 
@@ -42,6 +48,11 @@ class OutputM3UTest(TestCase):
         self.assertIn("POST requests with body are not allowed, body is:", response.content.decode())
 
 
+@override_settings(CACHES={
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    }
+})
 class OutputEPGXMLEscapingTest(TestCase):
     """Test XML escaping of channel_id attributes in EPG generation"""
 
@@ -58,7 +69,7 @@ class OutputEPGXMLEscapingTest(TestCase):
             channel_group=self.group
         )
 
-        url = reverse('output:generate_epg') + '?tvg_id_source=tvg_id'
+        url = reverse('output:epg_endpoint') + '?tvg_id_source=tvg_id'
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
@@ -83,7 +94,7 @@ class OutputEPGXMLEscapingTest(TestCase):
             channel_group=self.group
         )
 
-        url = reverse('output:generate_epg') + '?tvg_id_source=tvg_id'
+        url = reverse('output:epg_endpoint') + '?tvg_id_source=tvg_id'
         response = self.client.get(url)
 
         content = response.content.decode()
@@ -103,7 +114,7 @@ class OutputEPGXMLEscapingTest(TestCase):
             channel_group=self.group
         )
 
-        url = reverse('output:generate_epg') + '?tvg_id_source=tvg_id'
+        url = reverse('output:epg_endpoint') + '?tvg_id_source=tvg_id'
         response = self.client.get(url)
 
         content = response.content.decode()
@@ -129,7 +140,7 @@ class OutputEPGXMLEscapingTest(TestCase):
             channel_group=self.group
         )
 
-        url = reverse('output:generate_epg') + '?tvg_id_source=tvg_id'
+        url = reverse('output:epg_endpoint') + '?tvg_id_source=tvg_id'
         response = self.client.get(url)
 
         content = response.content.decode()
@@ -143,3 +154,48 @@ class OutputEPGXMLEscapingTest(TestCase):
             self.assertGreater(len(programmes), 0)
         except ET.ParseError as e:
             self.fail(f"Generated EPG with programme elements is not valid XML: {e}")
+
+
+@override_settings(CACHES={
+    'default': {
+        'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+    }
+})
+class OutputXCApiTest(TestCase):
+    def setUp(self):
+        self.client = Client()
+        self.user = User.objects.create_user(username="testuser", password="testpassword")
+        self.user.custom_properties = {"xc_password": "xcpassword"}
+        self.user.save()
+
+    def test_get_live_streams_wildcard_category(self):
+        """Test that a wildcard or invalid category_id does not cause a crash and returns all streams"""
+        group = ChannelGroup.objects.create(name="Live Group")
+        Channel.objects.create(
+            channel_number=1.0,
+            name="Test Channel",
+            tvg_id="test1",
+            channel_group=group,
+            user_level=0
+        )
+        
+        # Test category_id = '*'
+        url = reverse('xc_player_api') + '?action=get_live_streams&username=testuser&password=xcpassword&category_id=*'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = b"".join(response.streaming_content).decode()
+        self.assertIn("Test Channel", content)
+
+        # Test category_id = '0'
+        url = reverse('xc_player_api') + '?action=get_live_streams&username=testuser&password=xcpassword&category_id=0'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = b"".join(response.streaming_content).decode()
+        self.assertIn("Test Channel", content)
+
+        # Test category_id = 'all'
+        url = reverse('xc_player_api') + '?action=get_live_streams&username=testuser&password=xcpassword&category_id=all'
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        content = b"".join(response.streaming_content).decode()
+        self.assertIn("Test Channel", content)
