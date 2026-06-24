@@ -31,6 +31,9 @@ import gevent
 
 logger = logging.getLogger(__name__)
 
+# Redis key name constants for VOD proxying
+PROFILE_CONNECTIONS_KEY = "profile:{profile_id}:connections"
+
 _request_times = {}
 
 
@@ -252,6 +255,20 @@ def _get_stream_url_from_relation(relation):
         logger.error(f"[VOD-URL] Error getting stream URL from relation: {e}", exc_info=True)
         return None
 
+def vod_pool_has_capacity_for_profile(profile, redis_client) -> bool:
+    """VOD-specific profile capacity check using PROFILE_CONNECTIONS_KEY"""
+    if profile.max_streams == 0:
+        return True
+    connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=profile.id)
+    try:
+        profile_count = int(redis_client.get(connections_key) or 0)
+    except Exception:
+        profile_count = 0
+    if profile_count >= profile.max_streams:
+        return False
+    from apps.m3u.connection_pool import group_has_capacity_for_profile
+    return group_has_capacity_for_profile(profile, redis_client)
+
 def _get_m3u_profile(m3u_account, profile_id, session_id=None):
     """Get appropriate M3U profile for streaming using Redis-based viewer counts
 
@@ -265,10 +282,6 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
     """
     try:
         from core.utils import RedisClient
-        from apps.m3u.connection_pool import (
-            get_profile_connection_count,
-            pool_has_capacity_for_profile,
-        )
         redis_client = RedisClient.get_client()
 
         if not redis_client:
@@ -286,8 +299,10 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
             connection_data = redis_client.hgetall(persistent_connection_key)
 
             if connection_data:
-                existing_profile_id = connection_data.get('m3u_profile_id')
+                existing_profile_id = connection_data.get(b'm3u_profile_id') if b'm3u_profile_id' in connection_data else connection_data.get('m3u_profile_id')
                 if existing_profile_id:
+                    if isinstance(existing_profile_id, bytes):
+                        existing_profile_id = existing_profile_id.decode('utf-8')
                     try:
                         existing_profile = M3UAccountProfile.objects.get(
                             id=int(existing_profile_id),
@@ -295,7 +310,7 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
                             is_active=True
                         )
                         # Get current connections for logging
-                        profile_connections_key = f"profile_connections:{existing_profile.id}"
+                        profile_connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=existing_profile.id)
                         current_connections = int(redis_client.get(profile_connections_key) or 0)
 
                         logger.info(f"[PROFILE-SELECTION] Session {session_id} reusing existing profile {existing_profile.id}: {current_connections}/{existing_profile.max_streams} connections")
@@ -318,10 +333,10 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
                     is_active=True
                 )
                 # Check Redis-based current connections
-                profile_connections_key = f"profile_connections:{profile.id}"
-                current_connections = get_profile_connection_count(profile, redis_client)
+                profile_connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=profile.id)
+                current_connections = int(redis_client.get(profile_connections_key) or 0)
 
-                if pool_has_capacity_for_profile(profile, redis_client):
+                if vod_pool_has_capacity_for_profile(profile, redis_client):
                     logger.info(f"[PROFILE-SELECTION] Using requested profile {profile.id}: {current_connections}/{profile.max_streams} connections")
                     return (profile, current_connections)
                 logger.warning(f"[PROFILE-SELECTION] Requested profile {profile.id} is at capacity: {current_connections}/{profile.max_streams}")
@@ -343,9 +358,9 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
         profiles = [default_profile] + list(m3u_profiles.filter(is_default=False))
 
         for profile in profiles:
-            current_connections = get_profile_connection_count(profile, redis_client)
+            current_connections = int(redis_client.get(PROFILE_CONNECTIONS_KEY.format(profile_id=profile.id)) or 0)
 
-            if pool_has_capacity_for_profile(profile, redis_client):
+            if vod_pool_has_capacity_for_profile(profile, redis_client):
                 logger.info(f"[PROFILE-SELECTION] Selected profile {profile.id} ({profile.name}): {current_connections}/{profile.max_streams} connections")
                 return (profile, current_connections)
             else:

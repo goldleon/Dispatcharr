@@ -31,3 +31,27 @@
 LICENSE
 data/
 docker/data/
+
+# Graphify
+graphify-out/
+
+# IDEs
+.idea/
+
+# Docs and project info
+docs/
+*.md
+LICENSE
+
+# Local logo cache
+logo_cache/
+
+# Scripts / install files not needed in final container
+debian_install.sh
+redis_migration.py
+
+# Github Actions
+.github/
+
+# Package config
+.python-version

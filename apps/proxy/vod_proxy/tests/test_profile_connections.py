@@ -38,6 +38,13 @@ class FakeRedis:
     def exists(self, key):
         return key in self._data
 
+    def type(self, key):
+        if key not in self._data:
+            return b"none"
+        if "sessions" in key:
+            return b"zset"
+        return b"string"
+
     def pipeline(self):
         return FakePipeline(self)
 
@@ -97,18 +104,18 @@ class TestDecrementProfileConnectionsAtomic(TestCase):
     def test_decrement_does_not_go_negative(self):
         """Counter must be clamped to 0, never go negative."""
         redis = FakeRedis()
-        redis.set('profile_connections:1', 0)
+        redis.set('profile:1:connections', 0)
         mgr = self._make_manager(redis)
 
         result = mgr._decrement_profile_connections(1)
 
         self.assertEqual(result, 0)
-        self.assertEqual(int(redis._data.get('profile_connections:1', 0)), 0)
+        self.assertEqual(int(redis._data.get('profile:1:connections', 0)), 0)
 
     def test_decrement_from_one_reaches_zero(self):
         """Normal single decrement should reach 0."""
         redis = FakeRedis()
-        redis.set('profile_connections:1', 1)
+        redis.set('profile:1:connections', 1)
         mgr = self._make_manager(redis)
 
         result = mgr._decrement_profile_connections(1)
@@ -118,14 +125,14 @@ class TestDecrementProfileConnectionsAtomic(TestCase):
     def test_concurrent_decrements_clamp_to_zero(self):
         """Two concurrent decrements of a counter at 1 must not leave it at -1."""
         redis = FakeRedis()
-        redis.set('profile_connections:1', 1)
+        redis.set('profile:1:connections', 1)
         mgr = self._make_manager(redis)
 
         # Simulate two concurrent decrements (both fire before either reads back)
         mgr._decrement_profile_connections(1)
         mgr._decrement_profile_connections(1)
 
-        final = int(redis._data.get('profile_connections:1', 0))
+        final = int(redis._data.get('profile:1:connections', 0))
         self.assertGreaterEqual(final, 0, "Counter must not go negative after concurrent decrements")
 
 
@@ -251,3 +258,87 @@ class TestDecrementActiveStreamsAndCheck(TestCase):
             RedisBackedVODConnection.decrement_active_streams_and_check(conn)
 
         conn._release_lock.assert_called_once()
+
+
+class FakeMigrationRedis:
+    def __init__(self):
+        self._data = {}
+        self._types = {}
+
+    def scan_iter(self, match=None):
+        import fnmatch
+        for k in list(self._data.keys()):
+            k_str = k.decode('utf-8') if isinstance(k, bytes) else k
+            match_str = match.decode('utf-8') if isinstance(match, bytes) else match
+            if fnmatch.fnmatch(k_str, match_str):
+                yield k
+
+    def type(self, key):
+        return self._types.get(key, b"none")
+
+    def delete(self, key):
+        self._data.pop(key, None)
+        self._types.pop(key, None)
+
+    def set(self, key, value):
+        self._data[key] = value
+        self._types[key] = b"string"
+
+    def zadd(self, key, mapping):
+        if key not in self._data:
+            self._data[key] = {}
+            self._types[key] = b"zset"
+        for member, score in mapping.items():
+            self._data[key][member] = score
+
+    def zrange(self, key, start, stop):
+        zset = self._data.get(key, {})
+        return list(zset.keys())
+
+    def zrem(self, key, member):
+        if key in self._data and member in self._data[key]:
+            del self._data[key][member]
+            return 1
+        return 0
+
+    def exists(self, key):
+        return key in self._data
+
+
+class TestRedisMigration(TestCase):
+    """Verify that redis_migration.py correctly fixes key types and purges orphaned sessions."""
+
+    @patch('redis.from_url')
+    def test_migration_fixes_keys_and_purges_orphans(self, mock_from_url):
+        client = FakeMigrationRedis()
+        mock_from_url.return_value = client
+
+        # 1. Setup connection keys:
+        # profile:1:connections is wrong type (zset)
+        client.zadd("profile:1:connections", {b"dummy_member": 1})
+        # profile:2:connections is correct type (string)
+        client.set("profile:2:connections", "3")
+
+        # 2. Setup sessions and metadata:
+        # profile:3:sessions has two members: sessionA (exists) and sessionB (orphaned)
+        client.zadd("profile:3:sessions", {b"sessionA": 12345, b"sessionB": 12346})
+        client.set("vod:sessionA:meta", "active_meta")
+
+        # Run migration
+        from redis_migration import run_migration
+        run_migration()
+
+        # Assertions
+        # profile:1:connections should be recreated as string "0"
+        self.assertEqual(client.type("profile:1:connections"), b"string")
+        self.assertEqual(client._data["profile:1:connections"], "0")
+
+        # profile:2:connections should remain string "3"
+        self.assertEqual(client.type("profile:2:connections"), b"string")
+        self.assertEqual(client._data["profile:2:connections"], "3")
+
+        # profile:3:sessions should have purged sessionB but kept sessionA
+        remaining_members = client.zrange("profile:3:sessions", 0, -1)
+        self.assertIn(b"sessionA", remaining_members)
+        self.assertNotIn(b"sessionB", remaining_members)
+

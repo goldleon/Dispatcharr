@@ -22,6 +22,21 @@ from apps.m3u.models import M3UAccountProfile
 
 logger = logging.getLogger("vod_proxy")
 
+# Redis key name constants
+PROFILE_SESSIONS_KEY = "profile:{profile_id}:sessions"
+PROFILE_CONNECTIONS_KEY = "profile:{profile_id}:connections"
+SESSION_META_KEY = "vod:{session_id}:meta"
+
+# Configurable environment variables for VOD resume attempts and backoff
+VOD_MAX_RESUME_ATTEMPTS = int(os.environ.get("VOD_MAX_RESUME_ATTEMPTS", 5))
+VOD_RETRY_BACKOFF_SECONDS_RAW = os.environ.get("VOD_RETRY_BACKOFF_SECONDS", "0,1.0,2.5,4.0,8.0")
+try:
+    VOD_RETRY_BACKOFF_SECONDS = [float(x.strip()) for x in VOD_RETRY_BACKOFF_SECONDS_RAW.split(",")]
+except Exception as e:
+    logger.error(f"Error parsing VOD_RETRY_BACKOFF_SECONDS: {e}. Falling back to default backoff.")
+    VOD_RETRY_BACKOFF_SECONDS = [0.0, 1.0, 2.5, 4.0, 8.0]
+
+
 
 def _decode_redis_hash(data: dict) -> dict:
     """H5: Safely decode a Redis hgetall() response to str→str dict.
@@ -380,6 +395,13 @@ class RedisBackedVODConnection:
 
             if success:
                 logger.info(f"[{self.session_id}] Created new connection state in Redis with consolidated session metadata")
+                # Write current worker_id into session's Redis metadata
+                try:
+                    meta_key = SESSION_META_KEY.format(session_id=self.session_id)
+                    self.redis_client.hset(meta_key, "owner_worker", worker_id)
+                    logger.info(f"[{self.session_id}] Set owner_worker to {worker_id} in {meta_key}")
+                except Exception as e:
+                    logger.error(f"[{self.session_id}] Error writing owner_worker metadata on creation: {e}")
 
             return success
         finally:
@@ -843,6 +865,18 @@ class RedisBackedVODConnection:
             logger.info(f"[{self.session_id}] No Redis client - local cleanup only")
             return
 
+        # Check ownership from metadata before deleting Redis keys
+        meta_key = SESSION_META_KEY.format(session_id=self.session_id)
+        try:
+            owner = self.redis_client.hget(meta_key, "owner_worker")
+            if isinstance(owner, bytes):
+                owner = owner.decode("utf-8")
+            if owner and current_worker_id and owner != current_worker_id:
+                logger.info(f"[{self.session_id}] Skip Redis cleanup: current worker {current_worker_id} is not the owner (owner: {owner})")
+                return
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Error checking ownership in cleanup: {e}")
+
         # Acquire lock and do final check before cleanup to prevent race conditions
         if not self._acquire_lock():
             logger.warning(f"[{self.session_id}] Could not acquire lock for cleanup - skipping")
@@ -927,22 +961,44 @@ class MultiWorkerVODConnectionManager:
             import random
             return f"worker-{random.randint(1000, 9999)}"
 
+    def initialize_profile_keys(self, profile_id: int):
+        """Ensure the connections counter key exists as a string. Resets it if it is the wrong type."""
+        if not self.redis_client:
+            return
+        connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=profile_id)
+        try:
+            key_type = self.redis_client.type(connections_key)
+            if isinstance(key_type, bytes):
+                key_type = key_type.decode("utf-8")
+            if key_type != "string" and key_type != "none":
+                logger.warning(f"Profile connections key {connections_key} has wrong type ({key_type}), deleting and recreating it.")
+                self.redis_client.delete(connections_key)
+                self.redis_client.set(connections_key, "0")
+            elif key_type == "none":
+                self.redis_client.set(connections_key, "0")
+        except Exception as e:
+            logger.error(f"Error initializing profile keys: {e}")
+
     def _get_profile_connections_key(self, profile_id: int) -> str:
-        """Get Redis key for tracking connections per profile - STANDARDIZED with TS proxy"""
-        return f"profile_connections:{profile_id}:zset"
+        """Get Redis key for tracking connections per profile (fallback for compatibility)"""
+        return PROFILE_CONNECTIONS_KEY.format(profile_id=profile_id)
 
     def _check_profile_count(self, m3u_profile_id: int) -> int:
         """Get active connection count for profile after purging expired ones"""
         if not self.redis_client:
             return 0
         try:
-            key = self._get_profile_connections_key(m3u_profile_id)
+            sessions_key = PROFILE_SESSIONS_KEY.format(profile_id=m3u_profile_id)
+            connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=m3u_profile_id)
             current_time = time.time()
-            # Atomic purge and count
+            # Atomic purge and count from sessions ZSET
             pipeline = self.redis_client.pipeline()
-            pipeline.zremrangebyscore(key, "-inf", current_time)
-            pipeline.zcard(key)
+            pipeline.zremrangebyscore(sessions_key, "-inf", current_time)
+            pipeline.zcard(sessions_key)
             _, count = pipeline.execute()
+            
+            # Sync connections count key with ZSET
+            self.redis_client.set(connections_key, str(count))
             return int(count)
         except Exception as e:
             logger.error(f"Error checking profile count: {e}")
@@ -964,40 +1020,67 @@ class MultiWorkerVODConnectionManager:
         Returns:
             bool: True if slot was reserved (or unlimited), False if at capacity
         """
-        from apps.m3u.connection_pool import reserve_profile_slot
-
         if not session_id:
             logger.warning("[PROFILE-RESERVE] No session_id provided, cannot reserve slot")
             return False
 
         try:
-            reserved, new_count, _failure_reason = reserve_profile_slot(
-                m3u_profile, self.redis_client
-            )
-            if reserved:
-                key = self._get_profile_connections_key(m3u_profile.id)
+            # Ensure profile keys are initialized
+            self.initialize_profile_keys(m3u_profile.id)
+
+            sessions_key = PROFILE_SESSIONS_KEY.format(profile_id=m3u_profile.id)
+            connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=m3u_profile.id)
+
+            if m3u_profile.max_streams > 0:
+                pipeline = self.redis_client.pipeline()
+                pipeline.incr(connections_key)
                 expiry_time = time.time() + 60  # 60s heartbeat
-                self.redis_client.zadd(key, {session_id: expiry_time})
+                pipeline.zadd(sessions_key, {session_id: expiry_time})
+                
+                incr_res, _ = pipeline.execute()
+                new_count = int(incr_res)
+                
+                logger.info(f"[{session_id}] [PROFILE-RESERVE] ZADD to {sessions_key} (session {session_id}), INCR {connections_key} to {new_count}")
+
+                if new_count > m3u_profile.max_streams:
+                    # Over capacity, roll back
+                    pipeline = self.redis_client.pipeline()
+                    pipeline.decr(connections_key)
+                    pipeline.zrem(sessions_key, session_id)
+                    pipeline.execute()
+                    logger.info(
+                        f"[{session_id}] [PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: "
+                        f"{new_count}/{m3u_profile.max_streams} (session {session_id})"
+                    )
+                    return False
+                
                 logger.info(
-                    f"[PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved: "
-                    f"{new_count}/{m3u_profile.max_streams} (session {session_id})"
-                )
-            else:
-                logger.info(
-                    f"[PROFILE-RESERVE] Profile {m3u_profile.id} at capacity: "
+                    f"[{session_id}] [PROFILE-RESERVE] Profile {m3u_profile.id} slot reserved: "
                     f"{new_count}/{m3u_profile.max_streams}"
                 )
-            return reserved
+                return True
+            else:
+                # Unlimited streams
+                pipeline = self.redis_client.pipeline()
+                pipeline.incr(connections_key)
+                expiry_time = time.time() + 60
+                pipeline.zadd(sessions_key, {session_id: expiry_time})
+                incr_res, _ = pipeline.execute()
+                new_count = int(incr_res)
+                
+                logger.info(f"[{session_id}] [PROFILE-RESERVE] ZADD to {sessions_key} (session {session_id}), INCR {connections_key} to {new_count} (unlimited)")
+                return True
+
         except Exception as e:
             logger.error(f"Error reserving profile slot: {e}")
             return False
 
     def _refresh_profile_heartbeat(self, m3u_profile_id: int, session_id: str):
-        """Renew the heartbeat for a session in the profile connections zset"""
+        """Renew the heartbeat for a session in the profile sessions ZSET"""
         if not self.redis_client or not session_id:
             return
         try:
-            key = self._get_profile_connections_key(m3u_profile_id)
+            key = PROFILE_SESSIONS_KEY.format(profile_id=m3u_profile_id)
             expiry_time = time.time() + 60
             self.redis_client.zadd(key, {session_id: expiry_time})
             logger.debug(f"[PROFILE-HEARTBEAT] Refreshed heartbeat for session {session_id} (profile {m3u_profile_id})")
@@ -1065,25 +1148,54 @@ class MultiWorkerVODConnectionManager:
             logger.error(f"Failed to trigger VOD stats update: {e}")
 
     def _decrement_profile_connections(self, m3u_profile_id: int, session_id: str = None):
-        """Release profile and shared pool connection counters and ZSET tracking."""
-        from apps.m3u.connection_pool import release_profile_slot
+        """Release profile connection counter and ZSET tracking."""
+        if session_id:
+            # Check ownership before running
+            meta_key = SESSION_META_KEY.format(session_id=session_id)
+            try:
+                owner = self.redis_client.hget(meta_key, "owner_worker")
+                if isinstance(owner, bytes):
+                    owner = owner.decode("utf-8")
+                if owner and owner != self.worker_id:
+                    logger.info(f"[{session_id}] [PROFILE-DECR] Skip decrement: current worker {self.worker_id} is not the owner (owner: {owner})")
+                    return 0
+            except Exception as e:
+                logger.error(f"[{session_id}] Error checking ownership in _decrement_profile_connections: {e}")
 
         try:
-            # Release via connection pool
-            release_profile_slot(m3u_profile_id, self.redis_client)
+            sessions_key = PROFILE_SESSIONS_KEY.format(profile_id=m3u_profile_id)
+            connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=m3u_profile_id)
 
-            # If session_id is provided, remove it from ZSET heartbeat tracking
+            # Ensure profile keys are initialized
+            self.initialize_profile_keys(m3u_profile_id)
+
+            current = int(self.redis_client.get(connections_key) or 0)
+            if current <= 0:
+                if session_id:
+                    self.redis_client.zrem(sessions_key, session_id)
+                    logger.info(f"[{session_id}] [PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id} (zrem)")
+                self.redis_client.set(connections_key, "0")
+                logger.info(f"[{session_id or 'unknown'}] [PROFILE-DECR] Connections counter key {connections_key} already at or below zero")
+                return 0
+
+            pipeline = self.redis_client.pipeline()
             if session_id:
-                profile_connections_key = self._get_profile_connections_key(m3u_profile_id)
-                self.redis_client.zrem(profile_connections_key, session_id)
-                logger.info(f"[PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id} (zrem)")
+                pipeline.zrem(sessions_key, session_id)
+            pipeline.decr(connections_key)
+            results = pipeline.execute()
 
-            profile_key = self._get_profile_connections_key(m3u_profile_id)
-            new_count = int(self.redis_client.get(profile_key) or 0)
-            logger.info(f"[PROFILE-DECR] Profile {m3u_profile_id} connections: {new_count}")
+            if session_id:
+                logger.info(f"[{session_id}] [PROFILE-DECR] Session {session_id} removed from profile {m3u_profile_id} (zrem)")
+
+            new_count = int(results[-1])
+            if new_count < 0:
+                self.redis_client.set(connections_key, "0")
+                new_count = 0
+
+            logger.info(f"[{session_id or 'unknown'}] [PROFILE-DECR] Decremented connections for profile {m3u_profile_id}: {new_count}")
             return new_count
         except Exception as e:
-            logger.error(f"Error decrementing profile connections: {e}")
+            logger.error(f"[{session_id or 'unknown'}] Error decrementing profile connections: {e}")
             return 0
 
     def stream_content_with_session(self, session_id, content_obj, stream_url, m3u_profile,
@@ -1299,6 +1411,11 @@ class MultiWorkerVODConnectionManager:
 
                                 if old_worker != self.worker_id:
                                     logger.info(f"[{client_id}] Ownership transferred from worker {old_worker} to {self.worker_id}")
+                                    try:
+                                        meta_key = SESSION_META_KEY.format(session_id=client_id)
+                                        self.redis_client.hset(meta_key, "owner_worker", self.worker_id)
+                                    except Exception as meta_e:
+                                        logger.error(f"[{client_id}] Error writing owner_worker metadata on transfer: {meta_e}")
                                 else:
                                     logger.debug(f"[{client_id}] Worker {self.worker_id} retaining ownership")
                         finally:
@@ -1331,6 +1448,7 @@ class MultiWorkerVODConnectionManager:
                 stream_decremented = False
                 profile_decremented = False
                 stop_signal_detected = False
+                displaced_worker = False
                 try:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Starting Redis-backed stream")
 
@@ -1377,6 +1495,22 @@ class MultiWorkerVODConnectionManager:
                     current_chunk_size = 128 * 1024 if skip_bytes > 0 else 8192
                     
                     for chunk in upstream_response.iter_content(chunk_size=current_chunk_size):
+                        # Check ownership on every iteration
+                        try:
+                            meta_key = SESSION_META_KEY.format(session_id=client_id)
+                            current_owner = self.redis_client.hget(meta_key, "owner_worker")
+                            if isinstance(current_owner, bytes):
+                                current_owner = current_owner.decode("utf-8")
+                            if current_owner and current_owner != self.worker_id:
+                                logger.warning(
+                                    f"[{client_id}] Worker {self.worker_id} is no longer the owner "
+                                    f"(current owner: {current_owner}). Terminating stream immediately without cleanup."
+                                )
+                                displaced_worker = True
+                                return
+                        except Exception as e:
+                            logger.error(f"[{client_id}] Error checking ownership in chunk loop: {e}")
+
                         if chunk:
                             # Handle manual skipping if needed
                             if skip_bytes > 0 and total_skipped < skip_bytes:
@@ -1457,6 +1591,8 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread.start()
 
                 except GeneratorExit:
+                    if displaced_worker:
+                        return
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Client disconnected from Redis-backed stream")
                     if not stream_decremented:
                         stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
@@ -1492,21 +1628,49 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread.start()
 
                 except requests.exceptions.ChunkedEncodingError as e:
+                    if displaced_worker:
+                        return
                     # IncompleteRead wrapped by requests — upstream dropped the connection
-                    # mid-transfer (provider closed early, network blip, or a concurrent
-                    # generator for the same session closed the shared HTTP response).
-                    # Attempt to resume from the byte offset we reached using a Range
-                    # header, up to MAX_RESUME_RETRIES times, before giving up.
-                    MAX_RESUME_RETRIES = 3
+                    # mid-transfer. Attempt to resume using a Range header with exponential backoff.
                     resume_attempted = False
-                    for resume_attempt in range(1, MAX_RESUME_RETRIES + 1):
+                    for resume_attempt in range(1, VOD_MAX_RESUME_ATTEMPTS + 1):
+                        if displaced_worker:
+                            break
                         if bytes_sent == 0:
                             # Nothing sent yet — no point resuming
                             break
+
+                        # Apply exponential backoff delay (skip delay on attempt 1)
+                        if resume_attempt > 1:
+                            backoff_idx = resume_attempt - 1
+                            if backoff_idx < len(VOD_RETRY_BACKOFF_SECONDS):
+                                delay = VOD_RETRY_BACKOFF_SECONDS[backoff_idx]
+                            else:
+                                delay = VOD_RETRY_BACKOFF_SECONDS[-1]
+                            
+                            if delay > 0:
+                                logger.info(f"[{client_id}] Backing off for {delay} seconds before resume attempt {resume_attempt}")
+                                try:
+                                    import gevent
+                                    gevent.sleep(delay)
+                                except ImportError:
+                                    time.sleep(delay)
+
+                        # Invalidate cached final_url at start of resume attempt (do not wait for 509)
+                        if redis_connection._acquire_lock():
+                            try:
+                                state = redis_connection._get_connection_state(force_fresh=True)
+                                if state:
+                                    state.final_url = None
+                                    redis_connection._save_connection_state(state)
+                                    logger.info(f"[{client_id}] Invalidated cached final_url at start of resume attempt {resume_attempt}")
+                            finally:
+                                redis_connection._release_lock()
+
                         resume_range = f"bytes={bytes_sent}-"
                         logger.warning(
                             f"[{client_id}] Worker {self.worker_id} - Upstream connection "
-                            f"dropped at {bytes_sent:,} bytes (attempt {resume_attempt}/{MAX_RESUME_RETRIES}). "
+                            f"dropped at {bytes_sent:,} bytes (attempt {resume_attempt}/{VOD_MAX_RESUME_ATTEMPTS}). "
                             f"Trying resume with {resume_range}"
                         )
                         try:
@@ -1516,6 +1680,22 @@ class MultiWorkerVODConnectionManager:
                                 break
                             # Stream resumed — yield remaining chunks
                             for chunk in resumed_response.iter_content(chunk_size=8192):
+                                # Check ownership inside resume chunk loop
+                                try:
+                                    meta_key = SESSION_META_KEY.format(session_id=client_id)
+                                    current_owner = self.redis_client.hget(meta_key, "owner_worker")
+                                    if isinstance(current_owner, bytes):
+                                        current_owner = current_owner.decode("utf-8")
+                                    if current_owner and current_owner != self.worker_id:
+                                        logger.warning(
+                                            f"[{client_id}] Worker {self.worker_id} is no longer the owner "
+                                            f"(current owner: {current_owner}). Terminating stream immediately without cleanup."
+                                        )
+                                        displaced_worker = True
+                                        return
+                                except Exception as e:
+                                    logger.error(f"[{client_id}] Error checking ownership in chunk loop: {e}")
+
                                 if chunk:
                                     yield chunk
                                     bytes_sent += len(chunk)
@@ -1542,12 +1722,10 @@ class MultiWorkerVODConnectionManager:
                             break
                         except requests.exceptions.ChunkedEncodingError as retry_e:
                             logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
-                            time.sleep(0.5 * resume_attempt)  # brief back-off before next retry
                         except GeneratorExit:
+                            if displaced_worker:
+                                return
                             # Client disconnected while we were mid-resume.
-                            # The outer except GeneratorExit: will NOT be reached because we are
-                            # inside a sibling except-clause (ChunkedEncodingError). We must
-                            # perform cleanup here explicitly, then re-raise to terminate the generator.
                             logger.info(
                                 f"[{client_id}] Worker {self.worker_id} - Client disconnected "
                                 f"during resume attempt {resume_attempt}"
@@ -1588,16 +1766,13 @@ class MultiWorkerVODConnectionManager:
                                 cleanup_thread.start()
 
                             raise  # CRITICAL: re-raise GeneratorExit to terminate the generator properly
-                        except requests.exceptions.ChunkedEncodingError as retry_e:
-                            logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
-                            time.sleep(0.5 * resume_attempt)  # brief back-off before next retry
                         except Exception as retry_e:
                             logger.error(f"[{client_id}] Resume attempt {resume_attempt} failed: {retry_e}")
                             break
                     else:
                         logger.warning(
                             f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream "
-                            f"and all {MAX_RESUME_RETRIES} resume attempts failed: {e}"
+                            f"and all {VOD_MAX_RESUME_ATTEMPTS} resume attempts failed: {e}"
                         )
 
                     if not resume_attempted:
@@ -1616,10 +1791,11 @@ class MultiWorkerVODConnectionManager:
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on upstream drop")
                         redis_connection.cleanup(current_worker_id=self.worker_id)
-                    # Return without yielding error bytes
                     return
 
                 except Exception as e:
+                    if displaced_worker:
+                        return
                     logger.error(f"[{client_id}] Worker {self.worker_id} - Error in Redis-backed stream: {e}")
                     if not stream_decremented:
                         stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
@@ -1634,14 +1810,13 @@ class MultiWorkerVODConnectionManager:
                             self._decrement_profile_connections(profile_id, effective_session_id)
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on stream error")
-                        # Smart cleanup on error - immediate cleanup since we're in error state
-                        # No connection_manager — profile already decremented above
                         redis_connection.cleanup(current_worker_id=self.worker_id)
-                    # Do NOT yield error bytes — injecting text into a binary video stream
-                    # corrupts the player buffer. Return cleanly instead.
                     return
 
                 finally:
+                    if displaced_worker:
+                        logger.info(f"[{client_id}] Worker {self.worker_id} was displaced - bypassing finally cleanup block")
+                        return
                     if not stream_decremented:
                         # Retry up to 3 times if lock contention prevents decrement
                         for _retry in range(3):
@@ -1660,13 +1835,9 @@ class MultiWorkerVODConnectionManager:
 
                             # Delayed cleanup: wait 3s for seeking clients to reconnect
                             # before closing the provider connection and Redis keys.
-                            # cleanup() re-checks active_streams under lock, so a
-                            # reconnecting client that increments active_streams in
-                            # time will prevent Redis key deletion.
                             def delayed_cleanup():
                                 time.sleep(3)
                                 logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup in finally block")
-                                # No connection_manager — profile already decremented above
                                 redis_connection.cleanup(current_worker_id=self.worker_id)
 
                             cleanup_thread = threading.Thread(target=delayed_cleanup)
