@@ -34,6 +34,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Extract version info
+        run: |
+          VERSION=$(python3 -c "import sys; sys.path.append('.'); import version; print(version.__version__)")
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
       - name: Determine image tag and branch
         id: set-tag-branch
         run: |
@@ -62,6 +67,8 @@ jobs:
             REPO_URL=https://github.com/${{ github.repository }}
           tags: |
             ghcr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
+            ghcr.io/${{ env.REPO_NAME }}:${{ env.VERSION }}
             ghcr.io/${{ env.REPO_NAME }}:${{ github.sha }}
             docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ env.TAG }}
+            docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ env.VERSION }}
             docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ github.sha }}
