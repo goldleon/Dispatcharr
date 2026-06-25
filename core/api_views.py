@@ -469,7 +469,7 @@ def rehash_streams_endpoint(request):
 # ─────────────────────────────
 class TimezoneListView(APIView):
     """
-    API endpoint that returns all available timezones supported by pytz.
+    API endpoint that returns all available timezones via zoneinfo (stdlib).
     Returns a list of timezone names grouped by region for easy selection.
     This is a general utility endpoint that can be used throughout the application.
     """
@@ -481,10 +481,10 @@ class TimezoneListView(APIView):
         description="Get list of all supported timezones",
     )
     def get(self, request):
-        import pytz
+        from zoneinfo import available_timezones
 
-        # Get all common timezones (excludes deprecated ones)
-        all_timezones = sorted(pytz.common_timezones)
+        # ponytail: zoneinfo.available_timezones() returns a set; sort for stable output
+        all_timezones = sorted(available_timezones())
 
         # Group by region for better UX
         grouped = {}

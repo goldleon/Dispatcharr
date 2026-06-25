@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 import logging
-import pytz
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from core.models import CoreSettings
@@ -236,7 +236,7 @@ def create_backup() -> Path:
     # Use system timezone for filename (user-friendly), but keep internal timestamps as UTC
     system_tz_name = CoreSettings.get_system_time_zone()
     try:
-        system_tz = pytz.timezone(system_tz_name)
+        system_tz = ZoneInfo(system_tz_name)
         now_local = datetime.datetime.now(datetime.UTC).astimezone(system_tz)
         timestamp = now_local.strftime("%Y.%m.%d.%H.%M.%S")
     except Exception as e:

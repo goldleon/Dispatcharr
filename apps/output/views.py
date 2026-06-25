@@ -17,7 +17,6 @@ from django.shortcuts import get_object_or_404
 from datetime import datetime, timedelta
 import html
 import time
-from tzlocal import get_localzone
 from urllib.parse import urlencode
 import base64
 import logging
@@ -25,7 +24,7 @@ from django.db.models.functions import Lower
 import os
 from apps.m3u.utils import calculate_tuner_count
 from apps.proxy.utils import get_user_active_connections
-import regex
+import re
 from core.utils import log_system_event, build_absolute_uri_with_port
 import hashlib
 
@@ -522,7 +521,7 @@ def generate_custom_dummy_programs(channel_id, channel_name, now, num_days, cust
     ------------------
     The timezone parameter specifies the timezone of the event times in your channel
     titles using standard timezone names (e.g., 'US/Eastern', 'US/Pacific', 'Europe/London').
-    DST (Daylight Saving Time) is handled automatically by pytz.
+    DST (Daylight Saving Time) is handled automatically by zoneinfo.
 
     Examples:
     - Channel: "NHL 01: Bruins VS Maple Leafs @ 8:00PM ET"
@@ -541,7 +540,7 @@ def generate_custom_dummy_programs(channel_id, channel_name, now, num_days, cust
     Returns:
         List of program dictionaries with start_time/end_time in UTC
     """
-    import pytz
+    from zoneinfo import ZoneInfo
 
     logger.info(f"Generating custom dummy programs for channel: {channel_name}")
 
@@ -578,19 +577,19 @@ def generate_custom_dummy_programs(channel_id, channel_name, now, num_days, cust
 
     # Parse timezone name
     try:
-        source_tz = pytz.timezone(timezone_value)
+        source_tz = ZoneInfo(timezone_value)
         logger.debug(f"Using timezone: {timezone_value} (DST will be handled automatically)")
-    except pytz.exceptions.UnknownTimeZoneError:
+    except (KeyError, Exception):
         logger.warning(f"Unknown timezone: {timezone_value}, defaulting to UTC")
-        source_tz = pytz.utc
+        source_tz = ZoneInfo('UTC')
 
     # Parse output timezone if provided (for display purposes)
     output_tz = None
     if output_timezone_value:
         try:
-            output_tz = pytz.timezone(output_timezone_value)
+            output_tz = ZoneInfo(output_timezone_value)
             logger.debug(f"Using output timezone for display: {output_timezone_value}")
-        except pytz.exceptions.UnknownTimeZoneError:
+        except (KeyError, Exception):
             logger.warning(f"Unknown output timezone: {output_timezone_value}, will use source timezone")
             output_tz = None
 
@@ -934,17 +933,17 @@ def generate_custom_dummy_programs(channel_id, channel_name, now, num_days, cust
                 )
             )
 
-            # Use pytz to localize the naive datetime to the source timezone
+            # Use zoneinfo to localize the naive datetime to the source timezone
             # This automatically handles DST!
             try:
-                event_start_local = source_tz.localize(event_start_naive)
+                event_start_local = event_start_naive.replace(tzinfo=source_tz)
                 # Convert to UTC
-                event_start_utc = event_start_local.astimezone(pytz.utc)
+                event_start_utc = event_start_local.astimezone(datetime.UTC)
                 logger.debug(f"Converted {event_start_local} to UTC: {event_start_utc}")
             except Exception as e:
                 logger.error(f"Error localizing time to {source_tz}: {e}")
                 # Fallback: treat as UTC
-                event_start_utc = django_timezone.make_aware(event_start_naive, pytz.utc)
+                event_start_utc = django_timezone.make_aware(event_start_naive, datetime.UTC)
 
             event_end_utc = event_start_utc + timedelta(minutes=program_duration)
 
@@ -2029,7 +2028,7 @@ def xc_get_info(request, full=False):
             "url": hostname,
             "server_protocol": request.scheme,
             "port": port,
-            "timezone": get_localzone().key,
+            "timezone": str(datetime.now().astimezone().tzinfo),
             "timestamp_now": int(time.time()),
             "time_now": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "process": True,
