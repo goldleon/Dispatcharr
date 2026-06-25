@@ -495,12 +495,12 @@ class RedisBackedVODConnection:
 
             logger.info(f"[{self.session_id}] Making request #{state.request_count} to {'final' if state.final_url else 'original'} URL")
 
-            # Make request (10s connect, 10s read timeout - keeps lock time reasonable if client disconnects)
+            # Make request (10s connect, 30s read timeout - gives slow CDNs time to respond)
             response = self.local_session.get(
                 target_url,
                 headers=build_upstream_headers(headers),
                 stream=True,
-                timeout=(10, 10),
+                timeout=(10, 30),
                 allow_redirects=allow_redirects,
                 verify=state.ssl_verify
             )
@@ -522,7 +522,7 @@ class RedisBackedVODConnection:
                     state.stream_url,
                     headers=build_upstream_headers(headers),
                     stream=True,
-                    timeout=(10, 10),
+                    timeout=(10, 30),
                     allow_redirects=True,
                     verify=state.ssl_verify
                 )
@@ -1656,16 +1656,21 @@ class MultiWorkerVODConnectionManager:
                                 except ImportError:
                                     time.sleep(delay)
 
-                        # Invalidate cached final_url at start of resume attempt (do not wait for 509)
-                        if redis_connection._acquire_lock():
-                            try:
-                                state = redis_connection._get_connection_state(force_fresh=True)
-                                if state:
-                                    state.final_url = None
-                                    redis_connection._save_connection_state(state)
-                                    logger.info(f"[{client_id}] Invalidated cached final_url at start of resume attempt {resume_attempt}")
-                            finally:
-                                redis_connection._release_lock()
+                        # Only invalidate cached final_url on attempt 2+ to keep first resume fast.
+                        # Attempt 1 reuses the cached CDN endpoint (avoids slow redirect-following).
+                        # If that fails, attempt 2 falls back to the original URL.
+                        if resume_attempt > 1:
+                            if redis_connection._acquire_lock():
+                                try:
+                                    state = redis_connection._get_connection_state(force_fresh=True)
+                                    if state:
+                                        state.final_url = None
+                                        redis_connection._save_connection_state(state)
+                                        logger.info(f"[{client_id}] Invalidated cached final_url at start of resume attempt {resume_attempt}")
+                                finally:
+                                    redis_connection._release_lock()
+                        else:
+                            logger.info(f"[{client_id}] Resume attempt 1: keeping cached final_url for faster reconnect")
 
                         resume_range = f"bytes={bytes_sent}-"
                         logger.warning(

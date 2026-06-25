@@ -545,7 +545,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                     pass
 
             return HttpResponse(
-                status=301,
+                status=302,
                 headers={'Location': redirect_url}
             )
 
