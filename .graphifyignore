@@ -1,0 +1,15 @@
+# Exclude non-code files that require LLM semantic extraction
+docs/
+*.png
+*.svg
+*.md
+*.yml
+*.yaml
+*.html
+*.xml
+graphify-out/
+.venv/
+.github/
+docker/
+.idea/
+LICENSE
