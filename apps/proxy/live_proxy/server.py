@@ -1849,7 +1849,7 @@ class ProxyServer:
                                                     f"Channel {channel_id} in {channel_state} state with 0 clients for {time_since_ready:.1f}s "
                                                     f"(after reaching ready, shutdown_delay: {shutdown_delay}s) - stopping channel"
                                                 )
-                                                self._coordinated_stop_channel(channel_id)
+                                                gevent.spawn(self._coordinated_stop_channel, channel_id)
                                                 continue
                                         else:
                                             # Never reached ready - use grace_period timeout
@@ -1861,7 +1861,7 @@ class ProxyServer:
                                                     f"Channel {channel_id} stuck in {channel_state} state for {time_since_start:.1f}s "
                                                     f"with no clients (timeout: {connecting_timeout}s) - stopping channel due to upstream issues"
                                                 )
-                                                self._coordinated_stop_channel(channel_id)
+                                                gevent.spawn(self._coordinated_stop_channel, channel_id)
                                                 continue
                                 elif connection_ready_time:
                                     # We have clients now, but check grace period for state transition
@@ -1919,7 +1919,7 @@ class ProxyServer:
                                 elif current_time - disconnect_time > ConfigHelper.channel_shutdown_delay():
                                     # We've had no clients for the shutdown delay period
                                     logger.warning(f"No clients for {current_time - disconnect_time:.1f}s, stopping channel {channel_id}")
-                                    self._coordinated_stop_channel(channel_id)
+                                    gevent.spawn(self._coordinated_stop_channel, channel_id)
                                 else:
                                     # Still in shutdown delay period
                                     logger.debug(f"Channel {channel_id} shutdown timer: "

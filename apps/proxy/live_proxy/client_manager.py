@@ -46,7 +46,7 @@ class ClientManager:
         M2: Rate-limited to prevent broadcast storms under rapid client churn.
         """
         now = time.time()
-        if now - self._last_stats_update < 2.0:  # M2: debounce
+        if now - getattr(self, '_last_stats_update', 0.0) < 2.0:  # M2: debounce
             return
         self._last_stats_update = now
         threading.Thread(target=self._do_stats_update, daemon=True).start()

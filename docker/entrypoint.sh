@@ -121,7 +121,7 @@ export DJANGO_SECRET_KEY="$(tr -d '\r\n' < "$SECRET_FILE")"
 # UWSGI_NICE_LEVEL: Absolute nice value for uWSGI/streaming (default: 0 = normal priority)
 # CELERY_NICE_LEVEL: Absolute nice value for Celery/background tasks (default: 5 = low priority)
 # Note: The script will automatically calculate the relative offset for Celery since it's spawned by uWSGI
-export UWSGI_NICE_LEVEL=${UWSGI_NICE_LEVEL:-0}
+export UWSGI_NICE_LEVEL=${UWSGI_NICE_LEVEL:--2}
 CELERY_NICE_ABSOLUTE=${CELERY_NICE_LEVEL:-5}
 
 # Calculate relative nice value for Celery (since nice is relative to parent process)

@@ -40,7 +40,7 @@ class BaseConfig:
             return {
                 "buffering_timeout": 15,
                 "buffering_speed": 1.0,
-                "redis_chunk_ttl": 60,
+                "redis_chunk_ttl": 120,
                 "channel_shutdown_delay": 0,
                 "channel_init_grace_period": 5,
                 "new_client_behind_seconds": 5,
@@ -57,7 +57,7 @@ class BaseConfig:
     def get_redis_chunk_ttl(cls):
         """Get Redis chunk TTL from database or default"""
         settings = cls.get_proxy_settings()
-        return settings.get("redis_chunk_ttl", 60)
+        return settings.get("redis_chunk_ttl", 120)
 
     @property
     def REDIS_CHUNK_TTL(self):
@@ -93,7 +93,7 @@ class TSConfig(BaseConfig):
     HEALTH_CHECK_INTERVAL = 5  # Check stream health every N seconds
 
     # Resource management
-    CLEANUP_INTERVAL = 60  # Check for inactive channels every 60 seconds
+    CLEANUP_INTERVAL = 15  # Check for inactive channels every 15 seconds (Note: actual cleanup thread checks at CLEANUP_CHECK_INTERVAL)
 
     # Client tracking settings
     CLIENT_RECORD_TTL = 60  # How long client records persist in Redis (seconds). Client will be considered MIA after this time.
@@ -108,7 +108,7 @@ class TSConfig(BaseConfig):
     MIN_STABLE_TIME_BEFORE_RECONNECT = 30  # Minimum seconds a stream must be stable to try reconnect
     FAILOVER_GRACE_PERIOD = 20           # Extra time (seconds) to allow for stream switching before disconnecting clients
     URL_SWITCH_TIMEOUT = 20   # Max time allowed for a stream switch operation
-    MAX_KEEPALIVE_DURATION = 300         # Keepalive packets prevent _is_timeout() from firing, so without this a permanently failed stream holds clients open indefinitely.
+    MAX_KEEPALIVE_DURATION = 60          # Keepalive packets prevent _is_timeout() from firing, so without this a permanently failed stream holds clients open indefinitely. Reduced to 60s to prevent stale locks.
 
 
 
