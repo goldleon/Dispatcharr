@@ -1,43 +1,19 @@
-"""Log parsers for FFmpeg, Streamlink, and VLC output."""
+"""Log parsers for FFmpeg, Streamlink, and VLC output.
+
+ponytail: ABC hierarchy removed — 3 concrete parsers don't benefit from
+an abstract base. The factory is a plain dict lookup. Same public API:
+LogParserFactory.parse(), .auto_parse(), ._parsers.
+"""
 import re
 import logging
-from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
 
-class BaseLogParser(ABC):
-    """Base class for log parsers"""
-    
-    # Map of stream_type -> method_name that this parser handles
-    STREAM_TYPE_METHODS: Dict[str, str] = {}
-
-    @abstractmethod
-    def can_parse(self, line: str) -> Optional[str]:
-        """
-        Check if this parser can handle the line.
-        Returns the stream_type if it can parse, None otherwise.
-        e.g., 'video', 'audio', 'vlc_video', 'vlc_audio', 'streamlink'
-        """
-        pass
-
-    @abstractmethod
-    def parse_input_format(self, line: str) -> Optional[Dict[str, Any]]:
-        pass
-
-    @abstractmethod
-    def parse_video_stream(self, line: str) -> Optional[Dict[str, Any]]:
-        pass
-
-    @abstractmethod
-    def parse_audio_stream(self, line: str) -> Optional[Dict[str, Any]]:
-        pass
-
-
-class FFmpegLogParser(BaseLogParser):
+class FFmpegLogParser:
     """Parser for FFmpeg log output"""
-    
+
     STREAM_TYPE_METHODS = {
         'input': 'parse_input_format',
         'video': 'parse_video_stream',
@@ -47,18 +23,18 @@ class FFmpegLogParser(BaseLogParser):
     def can_parse(self, line: str) -> Optional[str]:
         """Check if this is an FFmpeg line we can parse"""
         lower = line.lower()
-        
+
         # Input format detection
         if lower.startswith('input #'):
             return 'input'
-        
+
         # Stream info (only during input phase, but we'll let stream_manager handle phase tracking)
         if 'stream #' in lower:
             if 'video:' in lower:
                 return 'video'
             elif 'audio:' in lower:
                 return 'audio'
-        
+
         return None
 
     def parse_input_format(self, line: str) -> Optional[Dict[str, Any]]:
@@ -72,7 +48,7 @@ class FFmpegLogParser(BaseLogParser):
                 return {'stream_type': input_format}
         except Exception as e:
             logger.debug(f"Error parsing FFmpeg input format: {e}")
-        
+
         return None
 
     def parse_video_stream(self, line: str) -> Optional[Dict[str, Any]]:
@@ -152,9 +128,9 @@ class FFmpegLogParser(BaseLogParser):
         return None
 
 
-class VLCLogParser(BaseLogParser):
+class VLCLogParser:
     """Parser for VLC log output"""
-    
+
     STREAM_TYPE_METHODS = {
         'vlc_video': 'parse_video_stream',
         'vlc_audio': 'parse_audio_stream'
@@ -163,25 +139,25 @@ class VLCLogParser(BaseLogParser):
     def can_parse(self, line: str) -> Optional[str]:
         """Check if this is a VLC line we can parse"""
         lower = line.lower()
-        
+
         # VLC TS demux codec detection
         if 'ts demux debug' in lower and 'type=' in lower:
             if 'video' in lower:
                 return 'vlc_video'
             elif 'audio' in lower:
                 return 'vlc_audio'
-        
+
         # VLC decoder output
         if 'decoder' in lower and ('channels:' in lower or 'samplerate:' in lower or 'x' in line or 'fps' in lower):
             if 'audio' in lower or 'channels:' in lower or 'samplerate:' in lower:
                 return 'vlc_audio'
             else:
                 return 'vlc_video'
-        
+
         # VLC transcode output for resolution/FPS
         if 'stream_out_transcode' in lower and ('source fps' in lower or ('source ' in lower and 'x' in line)):
             return 'vlc_video'
-        
+
         return None
 
     def parse_input_format(self, line: str) -> Optional[Dict[str, Any]]:
@@ -192,7 +168,7 @@ class VLCLogParser(BaseLogParser):
         try:
             lower = line.lower()
             result = {}
-            
+
             # Codec detection from TS demux
             video_codec_map = {
                 ('avc', 'h.264', 'type=0x1b'): "h264",
@@ -200,12 +176,12 @@ class VLCLogParser(BaseLogParser):
                 ('mpeg-2', 'type=0x02'): "mpeg2video",
                 ('mpeg-4', 'type=0x10'): "mpeg4"
             }
-            
+
             for patterns, codec in video_codec_map.items():
                 if any(p in lower for p in patterns):
                     result['video_codec'] = codec
                     break
-            
+
             # Extract FPS from transcode output: "source fps 30/1"
             fps_fraction_match = re.search(r'source fps\s+(\d+)/(\d+)', lower)
             if fps_fraction_match:
@@ -213,7 +189,7 @@ class VLCLogParser(BaseLogParser):
                 denominator = int(fps_fraction_match.group(2))
                 if denominator > 0:
                     result['source_fps'] = numerator / denominator
-            
+
             # Extract resolution from transcode output: "source 1280x720"
             source_res_match = re.search(r'source\s+(\d{3,4})x(\d{3,4})', lower)
             if source_res_match:
@@ -233,13 +209,13 @@ class VLCLogParser(BaseLogParser):
                         result['resolution'] = f"{width}x{height}"
                         result['width'] = width
                         result['height'] = height
-            
+
             # Fallback: try to extract FPS from generic format
             if 'source_fps' not in result:
                 fps_match = re.search(r'(\d+\.?\d*)\s*fps', lower)
                 if fps_match:
                     result['source_fps'] = float(fps_match.group(1))
-            
+
             return result if result else None
 
         except Exception as e:
@@ -252,7 +228,7 @@ class VLCLogParser(BaseLogParser):
         try:
             lower = line.lower()
             result = {}
-            
+
             # Codec detection from TS demux
             audio_codec_map = {
                 ('type=0xf', 'adts'): "aac",
@@ -260,12 +236,12 @@ class VLCLogParser(BaseLogParser):
                 ('type=0x06', 'type=0x81'): "ac3",
                 ('type=0x0b', 'lpcm'): "pcm"
             }
-            
+
             for patterns, codec in audio_codec_map.items():
                 if any(p in lower for p in patterns):
                     result['audio_codec'] = codec
                     break
-            
+
             # VLC decoder format: "AAC channels: 2 samplerate: 48000"
             if 'channels:' in lower:
                 channels_match = re.search(r'channels:\s*(\d+)', lower)
@@ -274,23 +250,23 @@ class VLCLogParser(BaseLogParser):
                     # Convert number to name
                     channel_names = {1: 'mono', 2: 'stereo', 6: '5.1', 8: '7.1'}
                     result['audio_channels'] = channel_names.get(num_channels, str(num_channels))
-            
+
             if 'samplerate:' in lower:
                 samplerate_match = re.search(r'samplerate:\s*(\d+)', lower)
                 if samplerate_match:
                     result['sample_rate'] = int(samplerate_match.group(1))
-            
+
             # Try to extract sample rate (Hz format)
             sample_rate_match = re.search(r'(\d+)\s*hz', lower)
             if sample_rate_match and 'sample_rate' not in result:
                 result['sample_rate'] = int(sample_rate_match.group(1))
-            
+
             # Try to extract channels (word format)
             if 'audio_channels' not in result:
                 channel_match = re.search(r'\b(mono|stereo|5\.1|7\.1|quad|2\.1)\b', lower)
                 if channel_match:
                     result['audio_channels'] = channel_match.group(1)
-            
+
             return result if result else None
 
         except Exception as e:
@@ -299,9 +275,9 @@ class VLCLogParser(BaseLogParser):
         return None
 
 
-class StreamlinkLogParser(BaseLogParser):
+class StreamlinkLogParser:
     """Parser for Streamlink log output"""
-    
+
     STREAM_TYPE_METHODS = {
         'streamlink': 'parse_video_stream'
     }
@@ -309,10 +285,10 @@ class StreamlinkLogParser(BaseLogParser):
     def can_parse(self, line: str) -> Optional[str]:
         """Check if this is a Streamlink line we can parse"""
         lower = line.lower()
-        
+
         if 'opening stream:' in lower or 'available streams:' in lower:
             return 'streamlink'
-        
+
         return None
 
     def parse_input_format(self, line: str) -> Optional[Dict[str, Any]]:
@@ -324,7 +300,7 @@ class StreamlinkLogParser(BaseLogParser):
             quality_match = re.search(r'(\d+p|\d+x\d+)', line)
             if quality_match:
                 quality = quality_match.group(1)
-                
+
                 if 'x' in quality:
                     resolution = quality
                     width, height = map(int, quality.split('x'))
@@ -337,7 +313,7 @@ class StreamlinkLogParser(BaseLogParser):
                         '360p': ('640x360', 640, 360)
                     }
                     resolution, width, height = resolutions.get(quality, ('1920x1080', 1920, 1080))
-                
+
                 return {
                     'video_codec': 'h264',
                     'resolution': resolution,
@@ -355,8 +331,10 @@ class StreamlinkLogParser(BaseLogParser):
         return None
 
 
+# ponytail: plain dict registry, no factory class indirection needed
+# but keeping LogParserFactory as a class to preserve callers' import paths
 class LogParserFactory:
-    """Factory to get the appropriate log parser"""
+    """Registry for log parsers — plain dict lookup, no ABC needed."""
 
     _parsers = {
         'ffmpeg': FFmpegLogParser(),
@@ -365,46 +343,23 @@ class LogParserFactory:
     }
 
     @classmethod
-    def _get_parser_and_method(cls, stream_type: str) -> Optional[tuple[BaseLogParser, str]]:
-        """Determine parser and method from stream_type"""
-        # Check each parser to see if it handles this stream_type
+    def parse(cls, stream_type: str, line: str) -> Optional[Dict[str, Any]]:
+        """Parse a log line based on stream type."""
         for parser in cls._parsers.values():
             method_name = parser.STREAM_TYPE_METHODS.get(stream_type)
             if method_name:
-                return (parser, method_name)
-        
-        return None
-
-    @classmethod
-    def parse(cls, stream_type: str, line: str) -> Optional[Dict[str, Any]]:
-        """
-        Parse a log line based on stream type.
-        Returns parsed data or None if parsing fails.
-        """
-        result = cls._get_parser_and_method(stream_type)
-        if not result:
-            return None
-        
-        parser, method_name = result
-        method = getattr(parser, method_name, None)
-        if method:
-            return method(line)
-        
+                method = getattr(parser, method_name, None)
+                if method:
+                    return method(line)
         return None
 
     @classmethod
     def auto_parse(cls, line: str) -> Optional[tuple[str, Dict[str, Any]]]:
-        """
-        Automatically detect which parser can handle this line and parse it.
-        Returns (stream_type, parsed_data) or None if no parser can handle it.
-        """
-        # Try each parser to see if it can handle this line
+        """Auto-detect parser and parse. Returns (stream_type, data) or None."""
         for parser in cls._parsers.values():
             stream_type = parser.can_parse(line)
             if stream_type:
-                # Parser can handle this line, now parse it
                 parsed_data = cls.parse(stream_type, line)
                 if parsed_data:
                     return (stream_type, parsed_data)
-        
         return None
