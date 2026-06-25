@@ -1656,21 +1656,32 @@ class MultiWorkerVODConnectionManager:
                                 except ImportError:
                                     time.sleep(delay)
 
-                        # Only invalidate cached final_url on attempt 2+ to keep first resume fast.
-                        # Attempt 1 reuses the cached CDN endpoint (avoids slow redirect-following).
-                        # If that fails, attempt 2 falls back to the original URL.
-                        if resume_attempt > 1:
-                            if redis_connection._acquire_lock():
-                                try:
-                                    state = redis_connection._get_connection_state(force_fresh=True)
-                                    if state:
-                                        state.final_url = None
-                                        redis_connection._save_connection_state(state)
-                                        logger.info(f"[{client_id}] Invalidated cached final_url at start of resume attempt {resume_attempt}")
-                                finally:
-                                    redis_connection._release_lock()
-                        else:
-                            logger.info(f"[{client_id}] Resume attempt 1: keeping cached final_url for faster reconnect")
+                        # Always invalidate cached final_url before resume.
+                        # The CDN frequently returns 509 (rate limit) when the cached
+                        # direct URL is reused across connections.  Falling back to the
+                        # original stream_url (which follows redirects) is slower but
+                        # avoids the 509 penalty.
+                        if redis_connection._acquire_lock():
+                            try:
+                                state = redis_connection._get_connection_state(force_fresh=True)
+                                if state:
+                                    state.final_url = None
+                                    redis_connection._save_connection_state(state)
+                                    logger.info(f"[{client_id}] Invalidated cached final_url at start of resume attempt {resume_attempt}")
+                            finally:
+                                redis_connection._release_lock()
+
+                        # Check if the client is still connected before spending
+                        # resources on upstream resume.  When the client has already
+                        # disconnected (e.g. TiviMate header probe), the session's
+                        # active_streams counter will be 0.  Without this check zombie
+                        # sessions keep hammering the CDN for 60+ seconds.
+                        if not redis_connection.has_active_streams():
+                            logger.info(
+                                f"[{client_id}] No active client streams — "
+                                f"aborting resume attempt {resume_attempt} to avoid zombie upstream connections"
+                            )
+                            break
 
                         resume_range = f"bytes={bytes_sent}-"
                         logger.warning(

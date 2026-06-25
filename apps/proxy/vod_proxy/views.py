@@ -525,29 +525,33 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                     redirect_url = f"{new_path}?{query_string}"
                 else:
                     redirect_url = new_path
+
+                logger.info(f"[VOD-SESSION] Redirecting to path-based URL: {redirect_url}")
+
+                # Persist the authenticated user to Redis so the streaming request
+                # (which arrives without the token after the redirect) can resolve it.
+                if user:
+                    try:
+                        from core.utils import RedisClient
+                        _r = RedisClient.get_client()
+                        if _r:
+                            _r.set(f"vod_session_user:{new_session_id}", user.id, ex=300)
+                    except Exception:
+                        pass
+
+                return HttpResponse(
+                    status=302,
+                    headers={'Location': redirect_url}
+                )
             else:
-                # XC path: keep the original path, put session_id in the query string
-                query_params['session_id'] = new_session_id
-                query_string = urlencode(query_params, doseq=True)
-                redirect_url = f"{request.path}?{query_string}"
-
-            logger.info(f"[VOD-SESSION] Redirecting to path-based URL: {redirect_url}")
-
-            # Persist the authenticated user to Redis so the streaming request
-            # (which arrives without the token after the redirect) can resolve it.
-            if user:
-                try:
-                    from core.utils import RedisClient
-                    _r = RedisClient.get_client()
-                    if _r:
-                        _r.set(f"vod_session_user:{new_session_id}", user.id, ex=300)
-                except Exception:
-                    pass
-
-            return HttpResponse(
-                status=302,
-                headers={'Location': redirect_url}
-            )
+                # XC/IPTV path: skip redirect entirely and use session_id inline.
+                # IPTV players (TiviMate, Smarters, etc.) never preserve query
+                # parameters across requests, so a redirect with ?session_id=...
+                # is useless — each new request would create a new session anyway.
+                # Skipping the redirect saves one round-trip and lets playback
+                # start immediately.
+                session_id = new_session_id
+                logger.info(f"[VOD-SESSION] XC path: using session {session_id} inline (no redirect)")
 
         # Resolve user from Redis session mapping when the streaming request
         # arrives without auth credentials (token was stripped from redirect URL).
