@@ -26,8 +26,6 @@ dependencies = [
     "m3u8",
     "rapidfuzz==3.14.5",
     "regex",
-    "tzlocal",
-    "pytz",
     "torch>=2.4.0",
     "sentence-transformers==5.4.1",
     "channels",
@@ -36,7 +34,6 @@ dependencies = [
     "django-redis",
     "django-celery-beat>=2.9.0",
     "lxml==6.1.0",
-    "packaging",
 ]
 
 [build-system]
