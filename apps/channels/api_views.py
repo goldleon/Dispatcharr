@@ -1419,7 +1419,7 @@ class ChannelViewSet(viewsets.ModelViewSet):
         """
         Efficiently apply a regex find/replace to the `name` field of multiple channels.
         """
-        import regex as re
+        import re
 
         channel_ids = request.data.get("channel_ids", [])
         pattern = request.data.get("find", "")

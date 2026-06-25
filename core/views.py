@@ -4,7 +4,7 @@ import signal
 from shlex import split as shlex_split
 import sys
 import logging
-import regex
+import re
 import redis
 
 from django.conf import settings

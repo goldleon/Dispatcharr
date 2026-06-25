@@ -1,7 +1,7 @@
 import hashlib
 import json
 import logging
-import regex
+import re
 from typing import Optional, Tuple, List
 from django.shortcuts import get_object_or_404
 from django.core.exceptions import ValidationError
