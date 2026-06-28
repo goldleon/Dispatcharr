@@ -43,8 +43,6 @@ def clean_metadata_id(value):
         return None
 
     return val_str
-
-
 def lookup_by_name_year(model, name_year_pairs):
     """Return {(name, year): row} for rows without TMDB/IMDB IDs.
 

@@ -26,7 +26,6 @@ from apps.accounts.authentication import ApiKeyAuthentication, QueryParamJWTAuth
 from apps.proxy.utils import check_user_stream_limits
 from dispatcharr.utils import network_access_allowed
 from core.utils import dispatcharr_user_agent
-
 import gevent
 
 logger = logging.getLogger(__name__)
@@ -282,6 +281,10 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
     """
     try:
         from core.utils import RedisClient
+        from apps.m3u.connection_pool import (
+            get_profile_connection_count,
+            pool_has_capacity_for_profile,
+        )
         redis_client = RedisClient.get_client()
 
         if not redis_client:
@@ -552,6 +555,20 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                 # start immediately.
                 session_id = new_session_id
                 logger.info(f"[VOD-SESSION] XC path: using session {session_id} inline (no redirect)")
+
+        # Resolve user from Redis session mapping when the streaming request
+        # arrives without auth credentials (token was stripped from redirect URL).
+        # Only needed on the first streaming request - skip if connection already exists.
+        if user is None:
+            try:
+                from core.utils import RedisClient
+                _r = RedisClient.get_client()
+                if _r and not _r.exists(f"vod_persistent_connection:{session_id}"):
+                    stored_uid = _r.get(f"vod_session_user:{session_id}")
+                    if stored_uid:
+                        user = User.objects.filter(id=int(stored_uid)).first()
+            except Exception:
+                pass
 
         # Resolve user from Redis session mapping when the streaming request
         # arrives without auth credentials (token was stripped from redirect URL).

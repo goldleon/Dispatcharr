@@ -248,18 +248,19 @@ class UserViewSet(viewsets.ModelViewSet):
             ALLOWED_FIELDS = {"custom_properties", "first_name", "last_name", "email", "password"}
             disallowed = set(request.data.keys()) - ALLOWED_FIELDS
 
-            if disallowed:
-                raise serializers.ValidationError({"detail": f"Fields not allowed for self-update: {', '.join(disallowed)}"})
+            data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+            for key in disallowed:
+                data.pop(key, None)
 
             # Strip admin-managed keys from custom_properties so users cannot
             # set their own XC credentials or network rules via this endpoint.
             ADMIN_ONLY_PROPS = {"xc_password", "allowed_networks"}
-            cp = request.data.get("custom_properties")
+            cp = data.get("custom_properties")
             if isinstance(cp, dict):
                 for key in ADMIN_ONLY_PROPS:
                     cp.pop(key, None)
 
-            serializer = UserSerializer(user, data=request.data, partial=True)
+            serializer = UserSerializer(user, data=data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)

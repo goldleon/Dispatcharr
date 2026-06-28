@@ -34,7 +34,10 @@
     "react-dom": "^19.2.5",
     "react-draggable": "^4.5.0",
     "react-hook-form": "^7.74.0",
+    "react-pro-sidebar": "^1.1.0",
     "react-router-dom": "^7.14.2",
+    "react-virtualized": "^9.22.6",
+    "react-virtualized-auto-sizer": "^1.0.26",
     "react-window": "^1.8.11",
     "recharts": "^2.15.4",
     "video.js": "^8.23.7",
@@ -58,16 +61,17 @@
     "globals": "^15.15.0",
     "jsdom": "^27.4.0",
     "prettier": "^3.8.3",
-    "vite": "^7.3.2",
+    "vite": "^7.3.5",
     "vitest": "^4.1.8"
   },
   "resolutions": {
-    "vite": "7.3.2",
+    "vite": "7.3.5",
     "react": "19.2.5",
     "react-dom": "19.2.5"
   },
   "overrides": {
-    "js-yaml": "^4.1.1",
+    "esbuild": "^0.28.1",
+    "js-yaml": "^5.1.0",
     "minimatch": "^10.2.1",
     "brace-expansion": "^5.0.5",
     "flatted": "^3.4.2",

@@ -2,7 +2,7 @@
 import os
 from celery import Celery
 import logging
-from celery.signals import task_postrun, worker_ready
+from celery.signals import task_postrun, task_prerun, worker_ready
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,18 @@ app.conf.update(
 app.conf.task_routes = {
     'apps.channels.tasks.run_recording': {'queue': 'dvr'},
 }
+
+
+@task_prerun.connect
+def reset_db_connection_before_task(**kwargs):
+    """Discard stale DB connections before each task (Celery workers are long-lived)."""
+    from django.db import close_old_connections
+
+    try:
+        close_old_connections()
+    except Exception:
+        pass
+
 
 # Add memory cleanup after task completion
 @task_postrun.connect  # Use the imported signal
