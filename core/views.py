@@ -16,7 +16,7 @@ from apps.m3u.models import M3UAccountProfile
 from core.models import StreamProfile, CoreSettings
 
 # Import the persistent lock (the “real” lock)
-from dispatcharr.persistent_lock import PersistentLock
+# ponytail: replaced with redis_client.lock
 
 # Configure logging to output to the console.
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
@@ -101,11 +101,10 @@ def stream_view(request, channel_uuid):
                 while stream_index < max_streams:
                     stream_index += 1
 
-                    lock_key = f"lock:{profile.id}:{stream_index}"
-                    persistent_lock = PersistentLock(redis_client, lock_key, lock_timeout=120)
+                    persistent_lock = redis_client.lock(lock_key, timeout=120)
                     logger.debug(f'Attempting to acquire lock: {lock_key}')
 
-                    if not persistent_lock.acquire():
+                    if not persistent_lock.acquire(blocking=False):
                         logger.error(f"Could not acquire persistent lock for profile {profile.id} index {stream_index}, currently in use.")
                         persistent_lock = None
                         continue
@@ -179,7 +178,10 @@ def stream_view(request, channel_uuid):
                 os.close(fd)
             proc_stdout = os.fdopen(stdout_r, 'rb')
         except Exception as e:
-            persistent_lock.release()
+            try:
+                persistent_lock.release()
+            except Exception:
+                pass
             logger.exception("Error starting stream for channel ID=%s", channel_uuid)
             return HttpResponseServerError(f"Error starting stream: {e}")
 
@@ -205,7 +207,10 @@ def stream_view(request, channel_uuid):
             except ChildProcessError:
                 pass
             stdout_file.close()
-            persistent_lock.release()
+            try:
+                persistent_lock.release()
+            except Exception:
+                pass
             logger.debug("Persistent lock released for channel ID=%s", channel.id)
 
     return StreamingHttpResponse(
