@@ -15,7 +15,6 @@ dependencies = [
     "pillow",
     "drf-spectacular>=0.29.0",
     "streamlink",
-    "python-vlc",
     "yt-dlp",
     "gevent==26.5.0",
     "django-db-geventpool",

@@ -483,7 +483,7 @@ class TimezoneListView(APIView):
     def get(self, request):
         from zoneinfo import available_timezones
 
-        # ponytail: zoneinfo.available_timezones() returns a set; sort for stable output
+        # ponytail: in-memory sorting, upgrade to cached or paginated response if timezone list size causes rendering bottlenecks
         all_timezones = sorted(available_timezones())
 
         # Group by region for better UX

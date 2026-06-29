@@ -395,7 +395,7 @@ def _transform_url(original_url, m3u_profile):
         safe_replace_pattern = re.sub(r'\$(\d+)', r'\\\1', safe_replace_pattern)
 
         if search_pattern and replace_pattern:
-            # ponytail: manual JS→Python conversion above makes stdlib re sufficient
+            # ponytail: stdlib re module, upgrade to third-party regex library if complex backtracking or JS features are required
             transformed_url = re.sub(search_pattern, safe_replace_pattern, original_url)
             return transformed_url
 

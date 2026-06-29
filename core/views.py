@@ -16,7 +16,7 @@ from apps.m3u.models import M3UAccountProfile
 from core.models import StreamProfile, CoreSettings
 
 # Import the persistent lock (the “real” lock)
-# ponytail: replaced with redis_client.lock
+# ponytail: global Redis lock, upgrade to per-resource locks if concurrency contention becomes a bottleneck
 
 # Configure logging to output to the console.
 logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)

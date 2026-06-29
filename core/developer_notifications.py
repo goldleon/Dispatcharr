@@ -380,33 +380,3 @@ def sync_developer_notifications() -> dict[str, int]:
         logger.warning(f"Failed to send websocket update: {e}")
 
     return results
-
-
-def get_user_developer_notifications(user) -> list:
-    """
-    Get all developer notifications that should be shown to a specific user.
-    Evaluates conditions and user_level for each notification.
-    """
-    from core.models import SystemNotification
-
-    # Get all active developer notifications
-    notifications = SystemNotification.objects.filter(
-        source=SystemNotification.Source.DEVELOPER,
-        is_active=True
-    )
-
-    # Filter by admin_only based on user
-    if getattr(user, 'user_level', 0) < 10:
-        notifications = notifications.filter(admin_only=False)
-
-    # Filter by conditions
-    result = []
-    for notification in notifications:
-        action_data = notification.action_data or {}
-
-        # Evaluate conditions
-        conditions = action_data.get('condition', [])
-        if evaluate_conditions(conditions, user):
-            result.append(notification)
-
-    return result

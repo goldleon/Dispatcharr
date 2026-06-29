@@ -10,6 +10,7 @@ import random
 import re
 import requests
 import requests.exceptions
+import urllib3.exceptions
 import os
 import socket
 import mimetypes
@@ -1627,7 +1628,7 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread.daemon = True
                         cleanup_thread.start()
 
-                except requests.exceptions.ChunkedEncodingError as e:
+                except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError) as e:
                     if displaced_worker:
                         return
                     # IncompleteRead wrapped by requests — upstream dropped the connection
@@ -1736,7 +1737,7 @@ class MultiWorkerVODConnectionManager:
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Resume completed after {resume_attempt} attempt(s): {bytes_sent:,} total bytes sent")
                             resume_attempted = True
                             break
-                        except requests.exceptions.ChunkedEncodingError as retry_e:
+                        except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError) as retry_e:
                             logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
                         except GeneratorExit:
                             if displaced_worker:

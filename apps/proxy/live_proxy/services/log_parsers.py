@@ -1,8 +1,6 @@
 """Log parsers for FFmpeg, Streamlink, and VLC output.
 
-ponytail: ABC hierarchy removed — 3 concrete parsers don't benefit from
-an abstract base. The factory is a plain dict lookup. Same public API:
-LogParserFactory.parse(), .auto_parse(), ._parsers.
+ponytail: plain dict lookup, upgrade to ABC hierarchy if we add more than 10 concrete parsers or need runtime pluggability
 """
 import re
 import logging
@@ -331,7 +329,7 @@ class StreamlinkLogParser:
         return None
 
 
-# ponytail: plain dict registry, no factory class indirection needed
+# ponytail: plain dict registry, upgrade to dynamic factory registration if parser plugins require runtime loading
 # but keeping LogParserFactory as a class to preserve callers' import paths
 class LogParserFactory:
     """Registry for log parsers — plain dict lookup, no ABC needed."""
