@@ -1950,6 +1950,13 @@ class MultiWorkerVODConnectionManager:
         except Exception as e:
             logger.error(f"[{client_id}] Worker {self.worker_id} - Error in Redis-backed stream_content_with_session: {e}", exc_info=True)
 
+            if existing_state and redis_connection:
+                try:
+                    redis_connection.decrement_active_streams()
+                    logger.info(f"[{client_id}] Decremented active streams after exception")
+                except Exception as decr_e:
+                    logger.error(f"[{client_id}] Error decrementing active streams after exception: {decr_e}")
+
             # Decrement profile connections if we incremented them but failed before streaming started
             if profile_connections_incremented:
                 logger.info(f"[{client_id}] Connection error occurred after profile increment - decrementing profile connections")

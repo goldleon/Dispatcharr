@@ -613,6 +613,7 @@ class StreamManager:
         except Exception as e:
             logger.error(f"Stream error: {e}", exc_info=True)
         finally:
+            self.running = False
             try:
                 from ..server import ProxyServer
                 ProxyServer.get_instance()._live_stream_managers.pop(self.channel_id, None)

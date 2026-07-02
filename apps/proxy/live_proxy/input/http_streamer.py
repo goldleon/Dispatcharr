@@ -157,6 +157,14 @@ class HTTPStreamReader:
             except:
                 pass
 
+        # Close read end of pipe
+        if self.pipe_read is not None:
+            try:
+                os.close(self.pipe_read)
+                self.pipe_read = None
+            except:
+                pass
+
         # Wait for thread
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=2.0)
