@@ -165,7 +165,9 @@ class InitializeChannelOwnershipOrderTests(SimpleTestCase):
                 patch("apps.proxy.live_proxy.server.RedisClient"), \
                 patch("apps.proxy.live_proxy.server.close_old_connections"), \
                 patch("apps.proxy.live_proxy.server.log_system_event"), \
-                patch("apps.proxy.live_proxy.server.threading.Thread"):
+                patch("apps.proxy.live_proxy.server.threading.Thread"), \
+                patch("apps.proxy.live_proxy.cache.get_channel_name") as mock_get_name:
+            mock_get_name.return_value = "Test Channel"
             result = server.initialize_channel(
                 "http://example.com/stream.ts",
                 CHANNEL_ID,

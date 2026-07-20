@@ -298,8 +298,10 @@ class InitializeChannelDbCleanupTests(SimpleTestCase):
 
 
 class StreamManagerDbCleanupTests(SimpleTestCase):
+    @patch("apps.proxy.live_proxy.cache.get_stream_profile_data")
+    @patch("apps.proxy.live_proxy.cache.get_stream_extra_data")
     @patch("apps.proxy.live_proxy.input.manager.Channel.objects")
-    def test_stream_manager_init_uses_passed_name_without_orm(self, mock_channel_objects):
+    def test_stream_manager_init_uses_passed_name_without_orm(self, mock_channel_objects, mock_extra, mock_profile):
         from apps.proxy.live_proxy.input.manager import StreamManager
 
         buffer = MagicMock()
@@ -319,8 +321,8 @@ class StreamManagerDbCleanupTests(SimpleTestCase):
         self.assertEqual(manager.channel_name, "Test Channel")
         mock_channel_objects.filter.assert_not_called()
 
-    @patch("apps.proxy.live_proxy.input.manager.close_old_connections")
-    def test_read_stderr_closes_db_on_exit(self, mock_close):
+    @patch("django.db.connection")
+    def test_read_stderr_closes_db_on_exit(self, mock_connection):
         from apps.proxy.live_proxy.input.manager import StreamManager
 
         manager = StreamManager.__new__(StreamManager)
@@ -331,7 +333,7 @@ class StreamManagerDbCleanupTests(SimpleTestCase):
 
         manager._read_stderr()
 
-        mock_close.assert_called_once()
+        mock_connection.close.assert_called_once()
 
 
 class GeneratorAndStatusDbCleanupTests(SimpleTestCase):
