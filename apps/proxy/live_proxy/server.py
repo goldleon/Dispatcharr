@@ -409,6 +409,9 @@ class ProxyServer:
                         except Exception as e:
                             logger.error(f"Error processing event message: {e}")
 
+                    # ponytail: prevent tight loop if listen() returns immediately (e.g. mocked client)
+                    gevent.sleep(1)
+
                 except (ConnectionError, TimeoutError) as e:
                     # Calculate exponential backoff with jitter
                     retry_count += 1
