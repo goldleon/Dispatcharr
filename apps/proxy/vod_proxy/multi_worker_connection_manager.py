@@ -323,6 +323,15 @@ class RedisBackedVODConnection:
         self.local_session = None  # Local requests session
         self.local_response = None  # Local current response
 
+    def _set_cache_state(self, state: SerializableConnectionState):
+        now = time.time()
+        # ponytail: periodically prune expired cache entries to prevent memory leak
+        if len(self._state_cache) > 200:
+            pruned = {k: v for k, v in self._state_cache.items() if now - v[0] < self._cache_ttl}
+            self._state_cache.clear()
+            self._state_cache.update(pruned)
+        self._state_cache[self.session_id] = (now, state)
+
     def _get_connection_state(self, force_fresh=False) -> Optional[SerializableConnectionState]:
         """Get connection state from Redis, using a short-lived local cache if appropriate"""
         if not self.redis_client:
@@ -348,7 +357,7 @@ class RedisBackedVODConnection:
             state = SerializableConnectionState.from_dict(data)
 
             with self._cache_lock:
-                self._state_cache[self.session_id] = (time.time(), state)
+                self._set_cache_state(state)
 
             return state
         except Exception as e:
@@ -389,7 +398,7 @@ class RedisBackedVODConnection:
                 self.redis_client.hset(self.connection_key, mapping=data)
                 self.redis_client.expire(self.connection_key, 3600)
                 with self._cache_lock:
-                    self._state_cache[self.session_id] = (time.time(), state)
+                    self._set_cache_state(state)
                 return True
 
             # Flat field/value list for Lua: TTL, then pairs
