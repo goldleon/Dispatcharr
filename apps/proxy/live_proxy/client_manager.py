@@ -54,29 +54,14 @@ class ClientManager:
     def _do_stats_update(self):
         """Perform the stats update in the background."""
         try:
-            from apps.proxy.live_proxy.channel_status import ChannelStatus
+            from apps.proxy.live_proxy.channel_status import build_live_channel_stats_data
             from core.utils import RedisClient
 
             redis_client = RedisClient.get_client()
             if not redis_client:
                 return
-            all_channels = []
-            cursor = 0
 
-            while True:
-                cursor, keys = redis_client.scan(cursor, match="live:channel:*:metadata", count=100)
-                for key in keys:
-                    # key may be bytes if decode_responses is not set
-                    key_str = key.decode('utf-8') if isinstance(key, bytes) else key
-                    parts = key_str.split(':')
-                    if len(parts) >= 4:
-                        ch_id = parts[2]
-                        channel_info = ChannelStatus.get_basic_channel_info(ch_id)
-                        if channel_info:
-                            all_channels.append(channel_info)
-
-                if cursor == 0:
-                    break
+            live_stats = build_live_channel_stats_data(redis_client)
 
             send_websocket_update(
                 "updates",
@@ -84,7 +69,7 @@ class ClientManager:
                 {
                     "success": True,
                     "type": "channel_stats",
-                    "stats": json.dumps({'channels': all_channels, 'count': len(all_channels)})
+                    "stats": json.dumps(live_stats),
                 }
             )
         except Exception as e:

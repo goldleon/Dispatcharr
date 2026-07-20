@@ -144,6 +144,16 @@ class Stream(models.Model):
     custom_headers = models.JSONField(
         blank=True, default=dict, help_text="Stream specific custom headers"
     )
+    # Populated at import from tv_archive / tv_archive_duration.
+    is_catchup = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Whether this stream supports catch-up/timeshift (tv_archive=1)",
+    )
+    catchup_days = models.PositiveIntegerField(
+        default=0,
+        help_text="Number of days of catch-up archive available (tv_archive_duration)",
+    )
 
     class Meta:
         # If you use m3u_account, you might do unique_together = ('name','url','m3u_account')
@@ -372,6 +382,17 @@ class Channel(models.Model):
         blank=True,
         related_name="auto_created_channels",
         help_text="The M3U account that auto-created this channel"
+    )
+
+    # Populated at import; rolled up via ChannelStream signal / m3u refresh.
+    is_catchup = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Whether any stream on this channel supports catch-up (tv_archive=1)",
+    )
+    catchup_days = models.PositiveIntegerField(
+        default=0,
+        help_text="Max catch-up archive days across all streams on this channel",
     )
 
     # Hidden channels are excluded from HDHR, M3U, EPG, and XC output queries.

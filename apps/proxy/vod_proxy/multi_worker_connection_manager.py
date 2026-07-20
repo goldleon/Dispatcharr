@@ -6,13 +6,10 @@ import time
 import json
 import logging
 import threading
-import random
-import re
 import requests
 import requests.exceptions
 import urllib3.exceptions
 import os
-import socket
 import mimetypes
 from urllib.parse import urlparse
 from typing import Optional, Dict, Any
@@ -37,8 +34,6 @@ except Exception as e:
     logger.error(f"Error parsing VOD_RETRY_BACKOFF_SECONDS: {e}. Falling back to default backoff.")
     VOD_RETRY_BACKOFF_SECONDS = [0.0, 1.0, 2.5, 4.0, 8.0]
 
-
-
 def _decode_redis_hash(data: dict) -> dict:
     """H5: Safely decode a Redis hgetall() response to str→str dict.
 
@@ -54,9 +49,77 @@ def _decode_redis_hash(data: dict) -> dict:
     return {k: (v.decode('utf-8') if isinstance(v, bytes) else v) for k, v in data.items()}
 
 class ProviderConnectionLimitError(Exception):
-
     """Raised when the IPTV provider returns HTTP 458 (max connections reached)."""
     pass
+
+# Atomic active_streams mutations. These run as Redis Lua so INCR/DECR never
+# contend with the session metadata lock used for ownership, seek info, and
+# get_stream header updates. One EVALSHA round-trip each.
+_LUA_INCR_ACTIVE_STREAMS = """
+-- vod_incr_as
+local key = KEYS[1]
+local activity = ARGV[1]
+if redis.call('EXISTS', key) == 0 then
+  return 0
+end
+local new_count = redis.call('HINCRBY', key, 'active_streams', 1)
+redis.call('HSET', key, 'last_activity', activity)
+return new_count
+"""
+
+_LUA_DECR_ACTIVE_STREAMS = """
+-- vod_decr_as
+local key = KEYS[1]
+local activity = ARGV[1]
+if redis.call('EXISTS', key) == 0 then
+  return {-1, 0}
+end
+local current = tonumber(redis.call('HGET', key, 'active_streams') or '0')
+if current <= 0 then
+  return {0, 0}
+end
+local new_count = current - 1
+redis.call('HSET', key, 'active_streams', new_count, 'last_activity', activity)
+return {1, new_count}
+"""
+
+_LUA_CLEANUP_IF_IDLE = """
+-- vod_cleanup_idle
+local conn_key = KEYS[1]
+if redis.call('EXISTS', conn_key) == 0 then
+  return 1
+end
+local current = tonumber(redis.call('HGET', conn_key, 'active_streams') or '0')
+if current > 0 then
+  return 0
+end
+-- Delete only the session hash. Do not DEL the metadata lock: another worker
+-- may hold it for ownership/seek updates, and removing it would let a late
+-- HSET recreate a zombie session without a coherent active_streams field.
+redis.call('DEL', conn_key)
+return 1
+"""
+
+# Metadata HSET only when the session hash still exists. Prevents a worker that
+# held the metadata lock across idle cleanup from recreating a zombie hash.
+_LUA_META_SAVE_IF_EXISTS = """
+-- vod_meta_save_if_exists
+local key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+if redis.call('EXISTS', key) == 0 then
+  return 0
+end
+for i = 2, #ARGV, 2 do
+  redis.call('HSET', key, ARGV[i], ARGV[i + 1])
+end
+if ttl and ttl > 0 then
+  redis.call('EXPIRE', key, ttl)
+end
+return 1
+"""
+
+# Cache register_script handles per redis client (EVALSHA thereafter).
+_vod_script_cache: Dict[int, Dict[str, Any]] = {}
 
 
 def get_vod_client_stop_key(client_id):
@@ -292,13 +355,26 @@ class RedisBackedVODConnection:
             logger.error(f"[{self.session_id}] Error getting connection state from Redis: {e}")
             return None
 
-    def _save_connection_state(self, state: SerializableConnectionState):
-        """Save connection state to Redis and update local cache"""
+    def _save_connection_state(self, state: SerializableConnectionState,
+                               include_active_streams: bool = False):
+        """Save connection state to Redis.
+
+        By default omits ``active_streams`` so metadata writes (ownership,
+        seek info, get_stream headers) cannot clobber the atomic counter
+        maintained by ``increment_active_streams`` / ``decrement_*``.
+        Pass ``include_active_streams=True`` only when creating a new session.
+
+        Metadata saves are applied only if the session hash still exists, so a
+        late write after idle cleanup cannot recreate a zombie session.
+        """
         if not self.redis_client:
             return False
 
         try:
             data = state.to_dict()
+            if not include_active_streams:
+                data.pop('active_streams', None)
+
             # Log the data being saved for debugging
             logger.trace(f"[{self.session_id}] Saving connection state: {data}")
 
@@ -308,24 +384,50 @@ class RedisBackedVODConnection:
                     logger.error(f"[{self.session_id}] None value found for key '{key}' - this should not happen")
                     return False
 
-            self.redis_client.hset(self.connection_key, mapping=data)
-            self.redis_client.expire(self.connection_key, 3600)  # 1 hour TTL
+            if include_active_streams:
+                # Session creation: key may not exist yet.
+                self.redis_client.hset(self.connection_key, mapping=data)
+                self.redis_client.expire(self.connection_key, 3600)
+                with self._cache_lock:
+                    self._state_cache[self.session_id] = (time.time(), state)
+                return True
+
+            # Flat field/value list for Lua: TTL, then pairs
+            args = ['3600']
+            for field, value in data.items():
+                args.extend([str(field), str(value)])
+
+            saved = int(
+                self._vod_scripts()['meta_save'](
+                    keys=[self.connection_key],
+                    args=args,
+                )
+                or 0
+            )
+            if not saved:
+                logger.debug(
+                    f"[{self.session_id}] Skipped metadata save; session no longer exists"
+                )
+                return False
 
             with self._cache_lock:
                 self._state_cache[self.session_id] = (time.time(), state)
-
             return True
         except Exception as e:
             logger.error(f"[{self.session_id}] Error saving connection state to Redis: {e}")
             return False
 
     def _acquire_lock(self, timeout: int = 10, max_wait: float = 3.0) -> bool:
-        """Acquire distributed lock for connection operations with retry backoff"""
+        """Acquire distributed lock for session metadata operations with retry backoff.
+
+        Not used for active_streams accounting; that is Redis-atomic via Lua.
+        """
         if not self.redis_client:
             return False
 
         start_time = time.time()
         attempt = 0
+        import random
         while time.time() - start_time < max_wait:
             try:
                 if self.redis_client.set(self.lock_key, "locked", nx=True, ex=timeout):
@@ -353,6 +455,21 @@ class RedisBackedVODConnection:
             self.redis_client.delete(self.lock_key)
         except Exception as e:
             logger.error(f"[{self.session_id}] Error releasing lock: {e}")
+
+    def _vod_scripts(self) -> Dict[str, Any]:
+        """Lazily register Lua scripts once per Redis client (EVALSHA thereafter)."""
+        client = self.redis_client
+        cache_key = id(client)
+        cached = _vod_script_cache.get(cache_key)
+        if cached is None:
+            cached = {
+                'incr': client.register_script(_LUA_INCR_ACTIVE_STREAMS),
+                'decr': client.register_script(_LUA_DECR_ACTIVE_STREAMS),
+                'cleanup': client.register_script(_LUA_CLEANUP_IF_IDLE),
+                'meta_save': client.register_script(_LUA_META_SAVE_IF_EXISTS),
+            }
+            _vod_script_cache[cache_key] = cached
+        return cached
 
     def create_connection(self, stream_url: str, headers: dict, m3u_profile_id: int = None,
                          # Session metadata (consolidated from vod_session key)
@@ -392,7 +509,8 @@ class RedisBackedVODConnection:
                 ssl_verify=ssl_verify,
                 user_id=user.id if user else "unknown"
             )
-            success = self._save_connection_state(state)
+            # Seed active_streams=0 once; later mutations are Lua HINCRBY only.
+            success = self._save_connection_state(state, include_active_streams=True)
 
             if success:
                 logger.info(f"[{self.session_id}] Created new connection state in Redis with consolidated session metadata")
@@ -582,22 +700,18 @@ class RedisBackedVODConnection:
 
                 logger.info(f"[{self.session_id}] Updated connection state: length={state.content_length}, type={state.content_type}")
 
-            # Save updated state under lock to avoid overwriting concurrent
-            # active_streams changes (e.g., another stream's GeneratorExit decrement)
+            # Metadata-only save: active_streams is omitted so concurrent Lua
+            # INCR/DECR cannot be overwritten by this get_stream header update.
             if self._acquire_lock():
                 try:
-                    current = self._get_connection_state(force_fresh=True)
-                    if current:
-                        # Preserve the current active_streams value — it may have been
-                        # modified by concurrent increment/decrement operations while
-                        # waiting for the upstream HTTP response.
-                        state.active_streams = current.active_streams
+
                     self._save_connection_state(state)
                 finally:
                     self._release_lock()
             else:
-                # Fallback: save without lock but skip active_streams to avoid overwrite
+                # Still persist headers without the lock; counter field is excluded.
                 logger.warning(f"[{self.session_id}] Could not acquire lock for get_stream state save")
+                self._save_connection_state(state)
 
             # Close any prior response before overwriting to avoid leaking the TCP socket.
             if self.local_response:
@@ -651,148 +765,98 @@ class RedisBackedVODConnection:
             logger.warning(f"[{self.session_id}] Could not validate range header {range_header}: {e}")
             return range_header
 
-    def increment_active_streams(self, client_tag=None):
-        """Increment active streams count in Redis. Returns new active_streams count, or 0 on failure.
+    def increment_active_streams(self):
+        """Atomically increment active_streams via Redis Lua (no session lock).
 
-        Args:
-            client_tag: Optional unique tag for this stream consumer (e.g. thread id).
-                        Used for heartbeat-based drift reconciliation.
-        """
-        if not self._acquire_lock():
-            logger.warning(f"[{self.session_id}] INCR-AS failed: could not acquire lock")
-            return 0
-
-        try:
-            state = self._get_connection_state(force_fresh=True)
-            if state:
-                old = state.active_streams
-                state.active_streams += 1
-                state.last_activity = time.time()
-                self._save_connection_state(state)
-                logger.debug(f"[{self.session_id}] INCR-AS {old} -> {state.active_streams}")
-
-                # Track in a secondary Redis Set for drift detection
-                if client_tag and self.redis_client:
-                    try:
-                        set_key = f"vod_active_set:{self.session_id}"
-                        self.redis_client.sadd(set_key, client_tag)
-                        self.redis_client.expire(set_key, 3600)  # 1h TTL as safety net
-                    except Exception as e:
-                        logger.debug(f"[{self.session_id}] Failed to update active set: {e}")
-
-                return state.active_streams
-            logger.warning(f"[{self.session_id}] INCR-AS failed: no state")
-            return 0
-        finally:
-            self._release_lock()
-
-    def decrement_active_streams(self, client_tag=None):
-        """Decrement active streams count in Redis
-
-        Args:
-            client_tag: Optional unique tag previously passed to increment_active_streams.
-        """
-        if not self._acquire_lock():
-            logger.warning(f"[{self.session_id}] DECR-AS failed: could not acquire lock")
-            return False
-
-        try:
-            state = self._get_connection_state(force_fresh=True)
-            if state and state.active_streams > 0:
-                old = state.active_streams
-                state.active_streams -= 1
-                state.last_activity = time.time()
-                self._save_connection_state(state)
-                logger.debug(f"[{self.session_id}] DECR-AS {old} -> {state.active_streams}")
-
-                # Remove from secondary tracking set
-                if client_tag and self.redis_client:
-                    try:
-                        set_key = f"vod_active_set:{self.session_id}"
-                        self.redis_client.srem(set_key, client_tag)
-                    except Exception as e:
-                        logger.debug(f"[{self.session_id}] Failed to update active set: {e}")
-
-                return True
-            if not state:
-                logger.warning(f"[{self.session_id}] DECR-AS failed: no state")
-            else:
-                logger.warning(f"[{self.session_id}] DECR-AS failed: active_streams already {state.active_streams}")
-            return False
-        finally:
-            self._release_lock()
-
-    def reconcile_active_streams(self):
-        """Reconcile the active_streams counter against the secondary tracking set.
-
-        If the counter is positive but the set is empty (or smaller), the counter
-        has drifted due to missed decrements. This resets the counter to match
-        the set cardinality, fixing phantom connection counts.
+        Returns new active_streams count, or 0 on failure / missing session.
         """
         if not self.redis_client:
-            return
-
-        if not self._acquire_lock():
-            return
+            return 0
 
         try:
-            state = self._get_connection_state(force_fresh=True)
-            if not state:
-                return
-
-            set_key = f"vod_active_set:{self.session_id}"
-            set_count = self.redis_client.scard(set_key) or 0
-
-            if state.active_streams != set_count:
-                logger.warning(
-                    f"[{self.session_id}] Counter drift detected: "
-                    f"counter={state.active_streams}, set={set_count}. "
-                    f"Reconciling to {set_count}."
+            new_count = int(
+                self._vod_scripts()['incr'](
+                    keys=[self.connection_key],
+                    args=[str(time.time())],
                 )
-                state.active_streams = set_count
-                state.last_activity = time.time()
-                self._save_connection_state(state)
+                or 0
+            )
+            if new_count <= 0:
+                logger.warning(f"[{self.session_id}] INCR-AS failed: no state")
+                return 0
+            logger.debug(f"[{self.session_id}] INCR-AS -> {new_count}")
+            return new_count
         except Exception as e:
-            logger.error(f"[{self.session_id}] Error reconciling active streams: {e}")
-        finally:
-            self._release_lock()
+            logger.error(f"[{self.session_id}] INCR-AS failed: {e}")
+            return 0
+
+    def decrement_active_streams(self):
+        """Atomically decrement active_streams via Redis Lua (no session lock)."""
+        success, _has_remaining = self.decrement_active_streams_and_check()
+        return success
+
 
     def decrement_active_streams_and_check(self):
-        """Atomically decrement active streams and return (success, has_remaining_streams).
+        """Atomically decrement active_streams and report whether any remain.
 
-        Combines decrement + check under a single lock to eliminate the race window
-        between separate decrement_active_streams() and has_active_streams() calls.
+        Uses a single Redis Lua script so the decrement + zero-check cannot
+        race with other workers, and does not take the session metadata lock
+        (so concurrent range-request metadata updates cannot block teardown).
 
         Returns:
             (True, False)  - decremented successfully, no streams remain
             (True, True)   - decremented successfully, other streams still active
-            (False, True)  - lock contention, assume streams remain (safe default)
+            (False, False) - no state, or active_streams already 0
         """
-        if not self._acquire_lock():
-            logger.warning(f"[{self.session_id}] DECR-AS-CHECK failed: could not acquire lock")
-            return False, True  # Assume remaining to avoid skipping profile decrement
+        if not self.redis_client:
+            return False, False
 
         try:
-            state = self._get_connection_state(force_fresh=True)
-            if state and state.active_streams > 0:
-                old = state.active_streams
-                state.active_streams -= 1
-                state.last_activity = time.time()
-                self._save_connection_state(state)
-                logger.debug(f"[{self.session_id}] DECR-AS {old} -> {state.active_streams}")
-                return True, state.active_streams > 0
-            if not state:
+            result = self._vod_scripts()['decr'](
+                keys=[self.connection_key],
+                args=[str(time.time())],
+            )
+            # redis-py returns [success_flag, new_count]
+            success_flag = int(result[0])
+            new_count = int(result[1])
+
+            if success_flag < 0:
                 logger.warning(f"[{self.session_id}] DECR-AS-CHECK failed: no state")
                 return False, False
-            logger.warning(f"[{self.session_id}] DECR-AS-CHECK failed: active_streams already {state.active_streams}")
-            return False, False
-        finally:
-            self._release_lock()
+            if success_flag == 0:
+                logger.warning(
+                    f"[{self.session_id}] DECR-AS-CHECK failed: active_streams already 0"
+                )
+                return False, False
+
+            logger.debug(f"[{self.session_id}] DECR-AS -> {new_count}")
+            return True, new_count > 0
+        except Exception as e:
+            logger.error(f"[{self.session_id}] DECR-AS-CHECK failed: {e}")
+            # Fail closed on remaining=True only for unexpected errors so we do
+            # not double-release the profile slot; callers still log loudly.
+            return False, True
 
     def has_active_streams(self) -> bool:
-        """Check if connection has any active streams"""
-        state = self._get_connection_state()
-        return state.active_streams > 0 if state else False
+        """Check if connection has any active streams (single HGET, not full hash)."""
+        if not self.redis_client:
+            return False
+        try:
+            val = self.redis_client.hget(self.connection_key, 'active_streams')
+            return int(val or 0) > 0
+        except Exception as e:
+            logger.error(f"[{self.session_id}] Error reading active_streams: {e}")
+            return False
+
+    def get_active_streams_count(self) -> int:
+        """Return current active_streams from Redis (0 if missing)."""
+        if not self.redis_client:
+            return 0
+        try:
+            val = self.redis_client.hget(self.connection_key, 'active_streams')
+            return int(val or 0)
+        except Exception:
+            return 0
 
     def get_headers(self):
         """Get headers for response"""
@@ -852,64 +916,37 @@ class RedisBackedVODConnection:
             logger.info(f"[{self.session_id}] No connection state found - local cleanup only")
             return
 
-        # Check if there are active streams
+        # Fast path: active streams present; leave Redis session intact
         if state.active_streams > 0:
-            # There are active streams - check ownership
             if current_worker_id and state.worker_id == current_worker_id:
                 logger.info(f"[{self.session_id}] Active streams present ({state.active_streams}) and we own them - local cleanup only")
             else:
                 logger.info(f"[{self.session_id}] Active streams present ({state.active_streams}) but owned by worker {state.worker_id} - local cleanup only")
             return
 
-        # No active streams - we can clean up Redis state
+        # No active streams: atomically delete only if still idle (Lua).
+        # Avoids racing a reconnect INCR between HGET and DEL without holding
+        # the metadata lock across the whole check.
         if not self.redis_client:
             logger.info(f"[{self.session_id}] No Redis client - local cleanup only")
             return
 
-        # Check ownership from metadata before deleting Redis keys
-        meta_key = SESSION_META_KEY.format(session_id=self.session_id)
         try:
-            owner = self.redis_client.hget(meta_key, "owner_worker")
-            if isinstance(owner, bytes):
-                owner = owner.decode("utf-8")
-            if owner and current_worker_id and owner != current_worker_id:
-                logger.info(f"[{self.session_id}] Skip Redis cleanup: current worker {current_worker_id} is not the owner (owner: {owner})")
-                return
-        except Exception as e:
-            logger.error(f"[{self.session_id}] Error checking ownership in cleanup: {e}")
-
-        # Acquire lock and do final check before cleanup to prevent race conditions
-        if not self._acquire_lock():
-            logger.warning(f"[{self.session_id}] Could not acquire lock for cleanup - skipping")
-            return
-
-        try:
-            # Re-check active streams with lock held to prevent race conditions
-            current_state = self._get_connection_state(force_fresh=True)
-            if not current_state:
-                logger.info(f"[{self.session_id}] Connection state no longer exists - cleanup already done")
+            deleted = int(
+                self._vod_scripts()['cleanup'](
+                    keys=[self.connection_key],
+                    args=[],
+                )
+                or 0
+            )
+            if not deleted:
+                logger.info(
+                    f"[{self.session_id}] Active streams present during cleanup - skipping Redis delete"
+                )
                 return
 
-            if current_state.active_streams > 0:
-                logger.info(f"[{self.session_id}] Active streams now present ({current_state.active_streams}) - skipping cleanup")
-                return
-
-            # Use pipeline for atomic cleanup operations
-            pipe = self.redis_client.pipeline()
-
-            # 1. Remove main connection state (contains consolidated data)
-            pipe.delete(self.connection_key)
-
-            # 2. Remove distributed lock (will be released below anyway)
-            pipe.delete(self.lock_key)
-
-            # Execute all cleanup operations
-            pipe.execute()
-
-            # Clear state cache
             with self._cache_lock:
                 self._state_cache.pop(self.session_id, None)
-
             logger.info(f"[{self.session_id}] Cleaned up Redis keys (verified no active streams)")
 
             # Decrement profile connections if we have the state and connection manager
@@ -926,9 +963,6 @@ class RedisBackedVODConnection:
 
         except Exception as e:
             logger.error(f"[{self.session_id}] Error cleaning up Redis state: {e}")
-        finally:
-            # Always release the lock
-            self._release_lock()
 
 
 # Modify the VODConnectionManager to use Redis-backed connections
@@ -1213,6 +1247,7 @@ class MultiWorkerVODConnectionManager:
         # Track whether we incremented profile connections (for cleanup on error)
         profile_connections_incremented = False
         redis_connection = None
+        existing_state = None
 
         logger.info(f"[{client_id}] Worker {self.worker_id} - Redis-backed streaming request for {content_type} {content_name}")
 
@@ -1296,6 +1331,14 @@ class MultiWorkerVODConnectionManager:
 
                     if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
                         logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded")
+                        return HttpResponse("Connection limit exceeded for profile", status=429)
+                    profile_connections_incremented = True
+                else:
+                    # Idle session reuse: active_streams already incremented above
+                    # Always need to re-reserve profile slot (GeneratorExit DECRed it)
+                    if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
+                        logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded on session reuse")
+                        redis_connection.decrement_active_streams()
                         return HttpResponse("Connection limit exceeded for profile", status=429)
                     profile_connections_incremented = True
 
@@ -1565,7 +1608,7 @@ class MultiWorkerVODConnectionManager:
 
                     # Schedule smart cleanup if no active streams after normal completion
                     if stream_decremented and not has_remaining and not profile_decremented:
-                        # Decrement profile counter immediately — don't defer to daemon thread
+                        # Decrement profile counter immediately; don't defer to daemon thread
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
@@ -1600,9 +1643,9 @@ class MultiWorkerVODConnectionManager:
                     else:
                         has_remaining = redis_connection.has_active_streams()
 
-                    # Schedule smart cleanup if no active streams
-                    if not has_remaining and not profile_decremented:
-                        # Decrement profile counter immediately — don't defer to daemon thread
+                    # Schedule smart cleanup if this stream's DECR left none remaining
+                    if stream_decremented and not has_remaining and not profile_decremented:
+                        # Decrement profile counter immediately; don't defer to daemon thread
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
@@ -1819,14 +1862,16 @@ class MultiWorkerVODConnectionManager:
                     else:
                         has_remaining = redis_connection.has_active_streams()
 
-                    # Decrement profile counter immediately if no other active streams
-                    if not has_remaining and not profile_decremented:
+                    # Decrement profile counter only when this stream's DECR hit zero
+                    if stream_decremented and not has_remaining and not profile_decremented:
                         state = redis_connection._get_connection_state()
                         profile_id = state.m3u_profile_id if state else m3u_profile.id
                         if profile_id:
                             self._decrement_profile_connections(profile_id, effective_session_id)
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on stream error")
+                        # Smart cleanup on error - immediate cleanup since we're in error state
+                        # No connection_manager; profile already decremented above
                         redis_connection.cleanup(current_worker_id=self.worker_id)
                     return
 
@@ -1852,9 +1897,13 @@ class MultiWorkerVODConnectionManager:
 
                             # Delayed cleanup: wait 3s for seeking clients to reconnect
                             # before closing the provider connection and Redis keys.
+                            # cleanup() atomically re-checks active_streams (Lua), so a
+                            # reconnecting client that increments active_streams in
+                            # time will prevent Redis key deletion.
                             def delayed_cleanup():
                                 time.sleep(3)
                                 logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup in finally block")
+                                # No connection_manager; profile already decremented above
                                 redis_connection.cleanup(current_worker_id=self.worker_id)
 
                             cleanup_thread = threading.Thread(target=delayed_cleanup)
@@ -1950,12 +1999,13 @@ class MultiWorkerVODConnectionManager:
         except Exception as e:
             logger.error(f"[{client_id}] Worker {self.worker_id} - Error in Redis-backed stream_content_with_session: {e}", exc_info=True)
 
+            # Roll back stream reservation if we incremented before get_stream failed
             if existing_state and redis_connection:
                 try:
                     redis_connection.decrement_active_streams()
                     logger.info(f"[{client_id}] Decremented active streams after exception")
-                except Exception as decr_e:
-                    logger.error(f"[{client_id}] Error decrementing active streams after exception: {decr_e}")
+                except Exception as decr_error:
+                    logger.error(f"[{client_id}] Error rolling back active_streams after connection failure: {decr_error}")
 
             # Decrement profile connections if we incremented them but failed before streaming started
             if profile_connections_incremented:
@@ -2109,17 +2159,8 @@ class MultiWorkerVODConnectionManager:
                         last_activity = float(data.get('last_activity', 0))
                         active_streams = int(data.get('active_streams', 0))
 
-                        # Reconcile counter drift before deciding whether to cleanup
                         session_id_str = key.decode('utf-8') if isinstance(key, bytes) else key
                         session_id = session_id_str.replace('vod_persistent_connection:', '')
-                        if active_streams > 0:
-                            redis_connection = RedisBackedVODConnection(session_id, self.redis_client)
-                            redis_connection.reconcile_active_streams()
-                            # Re-read after reconciliation
-                            refreshed = self.redis_client.hgetall(key)
-                            if refreshed:
-                                refreshed = _decode_redis_hash(refreshed)
-                                active_streams = int(refreshed.get('active_streams', 0))
 
                         # Clean up if stale and no active streams
                         if (current_time - last_activity > max_age_seconds) and active_streams == 0:
