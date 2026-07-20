@@ -2,6 +2,7 @@
 import logging
 from core.utils import build_upstream_headers
 import re
+import regex
 import requests
 import os
 import gc

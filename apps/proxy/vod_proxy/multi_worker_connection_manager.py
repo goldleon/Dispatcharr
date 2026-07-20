@@ -411,7 +411,7 @@ class RedisBackedVODConnection:
                 return False
 
             with self._cache_lock:
-                self._state_cache[self.session_id] = (time.time(), state)
+                self._state_cache.pop(self.session_id, None)
             return True
         except Exception as e:
             logger.error(f"[{self.session_id}] Error saving connection state to Redis: {e}")
@@ -1331,14 +1331,6 @@ class MultiWorkerVODConnectionManager:
 
                     if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
                         logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded")
-                        return HttpResponse("Connection limit exceeded for profile", status=429)
-                    profile_connections_incremented = True
-                else:
-                    # Idle session reuse: active_streams already incremented above
-                    # Always need to re-reserve profile slot (GeneratorExit DECRed it)
-                    if not self._check_and_reserve_profile_slot(m3u_profile, effective_session_id):
-                        logger.warning(f"[{client_id}] Profile {m3u_profile.name} connection limit exceeded on session reuse")
-                        redis_connection.decrement_active_streams()
                         return HttpResponse("Connection limit exceeded for profile", status=429)
                     profile_connections_incremented = True
 

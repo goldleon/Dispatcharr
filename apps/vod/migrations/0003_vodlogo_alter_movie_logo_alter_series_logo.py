@@ -10,6 +10,8 @@ def migrate_vod_logos_forward(apps, schema_editor):
     This copies all logos referenced by movies or series to VODLogo.
     Uses pure SQL for maximum performance.
     """
+    if schema_editor.connection.vendor != 'postgresql':
+        return
     from django.db import connection
 
     print("\n" + "="*80)
@@ -152,6 +154,8 @@ def cleanup_migrated_logos(apps, schema_editor):
 
     Uses efficient JOIN-based approach with LEFT JOIN to exclude channel usage.
     """
+    if schema_editor.connection.vendor != 'postgresql':
+        return
     from django.db import connection
 
     print("\n" + "="*80)
@@ -178,6 +182,42 @@ def cleanup_migrated_logos(apps, schema_editor):
     print("="*80 + "\n")
 
 
+def drop_foreign_key_constraints(apps, schema_editor):
+    if schema_editor.connection.vendor != 'postgresql':
+        return
+    with schema_editor.connection.cursor() as cursor:
+        cursor.execute("""
+            DO $$
+            DECLARE
+                constraint_name text;
+            BEGIN
+                SELECT conname INTO constraint_name
+                FROM pg_constraint
+                WHERE conrelid = 'vod_movie'::regclass
+                AND conname LIKE '%logo_id%fk%';
+
+                IF constraint_name IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE vod_movie DROP CONSTRAINT ' || constraint_name;
+                END IF;
+            END $$;
+        """)
+        cursor.execute("""
+            DO $$
+            DECLARE
+                constraint_name text;
+            BEGIN
+                SELECT conname INTO constraint_name
+                FROM pg_constraint
+                WHERE conrelid = 'vod_series'::regclass
+                AND conname LIKE '%logo_id%fk%';
+
+                IF constraint_name IS NOT NULL THEN
+                    EXECUTE 'ALTER TABLE vod_series DROP CONSTRAINT ' || constraint_name;
+                END IF;
+            END $$;
+        """)
+
+
 class Migration(migrations.Migration):
 
     dependencies = [
@@ -202,46 +242,9 @@ class Migration(migrations.Migration):
 
         # Step 2: Remove foreign key constraints temporarily (so we can change the IDs)
         # We need to find and drop the actual constraint names dynamically
-        migrations.RunSQL(
-            sql=[
-                # Drop movie logo constraint (find it dynamically)
-                """
-                DO $$
-                DECLARE
-                    constraint_name text;
-                BEGIN
-                    SELECT conname INTO constraint_name
-                    FROM pg_constraint
-                    WHERE conrelid = 'vod_movie'::regclass
-                    AND conname LIKE '%logo_id%fk%';
-
-                    IF constraint_name IS NOT NULL THEN
-                        EXECUTE 'ALTER TABLE vod_movie DROP CONSTRAINT ' || constraint_name;
-                    END IF;
-                END $$;
-                """,
-                # Drop series logo constraint (find it dynamically)
-                """
-                DO $$
-                DECLARE
-                    constraint_name text;
-                BEGIN
-                    SELECT conname INTO constraint_name
-                    FROM pg_constraint
-                    WHERE conrelid = 'vod_series'::regclass
-                    AND conname LIKE '%logo_id%fk%';
-
-                    IF constraint_name IS NOT NULL THEN
-                        EXECUTE 'ALTER TABLE vod_series DROP CONSTRAINT ' || constraint_name;
-                    END IF;
-                END $$;
-                """,
-            ],
-            reverse_sql=[
-                # The AlterField operations will recreate the constraints pointing to VODLogo,
-                # so we don't need to manually recreate them in reverse
-                migrations.RunSQL.noop,
-            ],
+        migrations.RunPython(
+            drop_foreign_key_constraints,
+            migrations.RunPython.noop,
         ),
 
         # Step 3: Migrate the data (this copies logos and updates references)
