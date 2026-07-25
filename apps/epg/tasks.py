@@ -40,13 +40,35 @@ from core.utils import (
 
 import gevent
 from .models import EPGSource, EPGSourceIndex, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
+from apps.epg.utils import (
+    _ONSCREEN_RE,
+    extract_season_episode_from_description,
+    send_epg_update,
+)
+from apps.epg.sd_utils import SD_BASE_URL
+from apps.epg.sd_tasks import (
+    SD_BULK_GUIDE_FETCH_THRESHOLD,
+    SD_DAYS_TO_FETCH,
+    SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
+    SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES,
+    SD_POSTER_STYLE_DEFAULT,
+    SD_PROGRAM_BATCH_SIZE,
+    _sd_backfill_schedule_dates_without_data,
+    _sd_compute_schedule_changes_from_md5,
+    _sd_pick_poster_url,
+    _sd_programs_needing_metadata,
+    fetch_schedules_direct,
+    fetch_schedules_direct_stations,
+    fetch_sd_guide_for_epg,
+    fetch_sd_mapped_guide_batch,
+    parse_schedules_direct_time,
+)
 from core.utils import (
     RedisClient,
     acquire_task_lock,
     is_task_lock_held,
     release_task_lock,
     TaskLockRenewer,
-    send_websocket_update,
     cleanup_memory,
     log_system_event,
     build_upstream_headers,
@@ -208,234 +230,6 @@ def _ensure_epg_refresh_terminal_status(source_id):
         )
 
 
-SD_BASE_URL = 'https://json.schedulesdirect.org/20141201'
-SD_DAYS_TO_FETCH = 20
-SD_PROGRAM_BATCH_SIZE = 5000
-SD_BULK_GUIDE_FETCH_THRESHOLD = 3
-SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS = 90
-SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES = 2
-
-def _sd_compute_schedule_changes_from_md5(server_md5s, cached_md5s, date_list):
-    """Return station_id -> [date_str] for dates whose schedule MD5 differs from cache."""
-    changed_by_station = {}
-    for (sid, date_str), server_info in server_md5s.items():
-        if date_str not in date_list:
-            continue
-        cached = cached_md5s.get((sid, date_str))
-        if cached != server_info['md5']:
-            changed_by_station.setdefault(sid, []).append(date_str)
-    return changed_by_station
-
-
-def _sd_backfill_schedule_dates_without_data(
-    changed_by_station,
-    server_md5s,
-    date_list,
-    mapped_station_ids,
-    epg_id_map,
-    dates_with_data,
-    cached_md5s,
-    stations_without_any_data,
-):
-    """
-    Add fetch-window dates that lack ProgramData to changed_by_station.
-
-    Dates with a cached schedule MD5 are treated as already fetched (e.g. legitimately
-    empty airings). Stations with zero ProgramData still backfill all missing dates
-    so stale cache from unmapped lineup refreshes cannot block guide population.
-    """
-    from datetime import date as date_type
-
-    stations_without_any_data = set(stations_without_any_data)
-    backfilled_count = 0
-    for sid in mapped_station_ids:
-        epg_db_id = epg_id_map.get(sid)
-        if not epg_db_id:
-            continue
-        force_despite_cache = sid in stations_without_any_data
-        already_changing = set(changed_by_station.get(sid, []))
-        for ds in date_list:
-            if ds in already_changing or (sid, ds) not in server_md5s:
-                continue
-            if (epg_db_id, date_type.fromisoformat(ds)) in dates_with_data:
-                continue
-            if (sid, ds) in cached_md5s and not force_despite_cache:
-                continue
-            changed_by_station.setdefault(sid, []).append(ds)
-            backfilled_count += 1
-    return backfilled_count
-
-
-def _sd_programs_needing_metadata(
-    program_ids_needed,
-    schedule_program_md5s,
-    cached_prog_md5s,
-    programs_with_data,
-):
-    """Return programIDs that need metadata download from Schedules Direct."""
-    programs_with_data = set(programs_with_data)
-    return {
-        pid for pid in program_ids_needed
-        if schedule_program_md5s.get(pid) != cached_prog_md5s.get(pid)
-        or pid not in programs_with_data
-    }
-
-
-SD_POSTER_CATEGORIES = (
-    'Iconic', 'Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner',
-    'Staple', 'Poster Art', 'Box Art',
-)
-
-SD_POSTER_STYLE_CONFIG = {
-    'portrait_iconic': {
-        'aspect_groups': (('2x3', '3x4'),),
-        'categories': ('Iconic',),
-    },
-    'portrait_banner': {
-        'aspect_groups': (('2x3', '3x4'),),
-        'categories': ('Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner'),
-    },
-    'landscape_iconic': {
-        'aspect_groups': (('16x9', '4x3'),),
-        'categories': ('Iconic',),
-    },
-    'landscape_banner': {
-        'aspect_groups': (('16x9', '4x3'),),
-        'categories': ('Banner-L1', 'Banner-L2', 'Banner-L3', 'Banner'),
-    },
-    'square_iconic': {
-        'aspect_groups': (('1x1',),),
-        'categories': ('Iconic',),
-    },
-}
-
-
-def _sd_image_width(img):
-    try:
-        return int(img.get('width') or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _sd_is_primary(img):
-    val = img.get('primary')
-    if val is True:
-        return True
-    if isinstance(val, str):
-        return val.lower() in ('true', '1', 'yes')
-    return False
-
-
-def _sd_matching_images(images, *, categories=None, aspects=None, min_width=0, primary_only=False):
-    matches = []
-    for img in images:
-        if not isinstance(img, dict):
-            continue
-        if primary_only and not _sd_is_primary(img):
-            continue
-        if categories is not None and img.get('category') not in categories:
-            continue
-        if aspects is not None and img.get('aspect') not in aspects:
-            continue
-        if _sd_image_width(img) < min_width:
-            continue
-        if img.get('uri'):
-            matches.append(img)
-    return matches
-
-
-def _sd_best_image(matches):
-    if not matches:
-        return None
-    best = max(matches, key=lambda img: (_sd_is_primary(img), _sd_image_width(img)))
-    return best.get('uri')
-
-
-def _sd_find_image(images, *, categories=None, aspects=None, min_width=0, primary_only=False):
-    return _sd_best_image(_sd_matching_images(
-        images,
-        categories=categories,
-        aspects=aspects,
-        min_width=min_width,
-        primary_only=primary_only,
-    ))
-
-
-SD_POSTER_STYLE_DEFAULT = 'sd_recommended'
-SD_POSTER_PORTRAIT_FALLBACK = 'portrait_iconic'
-
-
-def _sd_pick_recommended_poster_url(images):
-    """Use Gracenote's primary flag, then fall back to portrait iconic."""
-    min_widths = (240, 135, 120, 0)
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=SD_POSTER_CATEGORIES,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
-        )
-        if uri:
-            return uri
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=None,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
-        )
-        if uri:
-            return uri
-    return _sd_pick_poster_url(images, SD_POSTER_PORTRAIT_FALLBACK)
-
-
-def _sd_pick_poster_url(images, poster_style=SD_POSTER_STYLE_DEFAULT):
-    """Pick the best SD poster URI for the user's style preference, with fallbacks."""
-    if poster_style == 'sd_recommended':
-        return _sd_pick_recommended_poster_url(images)
-
-    config = SD_POSTER_STYLE_CONFIG.get(poster_style)
-    if not config:
-        return _sd_pick_recommended_poster_url(images)
-    min_widths = (240, 135, 120, 0)
-
-    for min_w in min_widths:
-        for cat in config['categories']:
-            for aspects in config['aspect_groups']:
-                uri = _sd_find_image(images, categories=(cat,), aspects=aspects, min_width=min_w)
-                if uri:
-                    return uri
-
-    for min_w in min_widths:
-        for aspects in config['aspect_groups']:
-            uri = _sd_find_image(images, categories=SD_POSTER_CATEGORIES, aspects=aspects, min_width=min_w)
-            if uri:
-                return uri
-
-    for aspects in config['aspect_groups']:
-        uri = _sd_find_image(images, categories=None, aspects=aspects, min_width=0)
-        if uri:
-            return uri
-
-    # Fallback: SD primary among poster categories (any aspect)
-    for min_w in min_widths:
-        uri = _sd_find_image(
-            images,
-            categories=SD_POSTER_CATEGORIES,
-            aspects=None,
-            min_width=min_w,
-            primary_only=True,
-        )
-        if uri:
-            return uri
-
-    if poster_style != SD_POSTER_PORTRAIT_FALLBACK:
-        return _sd_pick_poster_url(images, SD_POSTER_PORTRAIT_FALLBACK)
-
-    return None
-
 # DOCTYPE internal subset for XMLTV files.  Declares all 252 HTML 4 named
 # entities so lxml/libxml2 can resolve references like &eacute; correctly
 # instead of silently dropping them in recovery mode.
@@ -573,32 +367,6 @@ def validate_icon_url_fast(icon_url, max_length=None):
 
 MAX_EXTRACT_CHUNK_SIZE = 65536 # 64kb (base2)
 
-
-def send_epg_update(source_id, action, progress, **kwargs):
-    """Send WebSocket update about EPG download/parsing progress"""
-    # Start with the base data dictionary
-    data = {
-        "progress": progress,
-        "type": "epg_refresh",
-        "source": source_id,
-        "action": action,
-    }
-
-    # Add the additional key-value pairs from kwargs
-    data.update(kwargs)
-
-    # Use the standardized update function with garbage collection for program parsing
-    # This is a high-frequency operation that needs more aggressive memory management
-    collect_garbage = action == "parsing_programs" and progress % 10 == 0
-    send_websocket_update('updates', 'update', data, collect_garbage=collect_garbage)
-
-    # Explicitly clear references
-    data = None
-
-    # For high-frequency parsing, occasionally force additional garbage collection
-    # to prevent memory buildup
-    if action == "parsing_programs" and progress % 50 == 0:
-        cleanup_memory()
 
 
 def delete_epg_refresh_task_by_id(epg_id):
@@ -2777,91 +2545,6 @@ def parse_programs_for_source(epg_source, tvg_id=None):
             process = None
 
 
-def _sd_fetch_lineup_country(token, sd_headers_fn):
-    """Return country code prefix from the first subscribed lineup (poster metadata)."""
-    try:
-        lineups_response = requests.get(
-            f"{SD_BASE_URL}/lineups",
-            headers=sd_headers_fn(token),
-            timeout=30,
-        )
-        if lineups_response.ok:
-            for lineup in lineups_response.json().get('lineups', []):
-                lid = lineup.get('lineupID') or lineup.get('lineup') or ''
-                if '-' in lid:
-                    return lid.split('-')[0]
-    except requests.exceptions.RequestException as e:
-        logger.warning(f"Could not fetch lineups for country code: {e}")
-    return None
-
-
-def _sd_setup_single_epg_fetch(source, epg_id, token, sd_headers_fn):
-    """Build station_map / epg_id_map for a single mapped EPG entry."""
-    epg = EPGData.objects.filter(id=epg_id, epg_source=source).first()
-    if not epg or not epg.tvg_id:
-        msg = f"Schedules Direct EPG entry {epg_id} not found or missing station ID."
-        logger.error(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return None
-
-    sd_lineup_country = _sd_fetch_lineup_country(token, sd_headers_fn)
-
-    send_epg_update(
-        source.id, "parsing_programs", 15,
-        message=f"Fetching guide data for {epg.name or epg.tvg_id}...",
-    )
-    station_map = {epg.tvg_id: {'name': epg.name or epg.tvg_id, 'logo_url': epg.icon_url}}
-    epg_id_map = {epg.tvg_id: epg.id}
-    return station_map, epg_id_map, sd_lineup_country, epg
-
-
-def _sd_setup_mapped_guide_fetch(source, token, sd_headers_fn):
-    """Build station_map / epg_id_map for all channels mapped to this SD source."""
-    from apps.channels.models import Channel
-
-    mapped_epg_ids = set(
-        Channel.objects.filter(
-            epg_data__epg_source=source,
-            epg_data__isnull=False,
-        ).values_list('epg_data_id', flat=True)
-    )
-    if not mapped_epg_ids:
-        msg = "No channels mapped to this Schedules Direct source."
-        logger.info(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="idle", message=msg)
-        return None
-
-    station_map = {}
-    epg_id_map = {}
-    for epg in EPGData.objects.filter(id__in=mapped_epg_ids, epg_source=source):
-        if not epg.tvg_id:
-            continue
-        station_map[epg.tvg_id] = {
-            'name': epg.name or epg.tvg_id,
-            'logo_url': epg.icon_url,
-        }
-        epg_id_map[epg.tvg_id] = epg.id
-
-    if not station_map:
-        msg = "Mapped channels have no valid Schedules Direct station IDs."
-        logger.warning(msg)
-        source.last_message = msg
-        source.save(update_fields=['last_message'])
-        send_epg_update(source.id, "parsing_programs", 100, status="error", error=msg)
-        return None
-
-    sd_lineup_country = _sd_fetch_lineup_country(token, sd_headers_fn)
-    send_epg_update(
-        source.id, "parsing_programs", 15,
-        message=f"Fetching guide data for {len(station_map)} mapped stations...",
-    )
-    return station_map, epg_id_map, sd_lineup_country
-
-
 def dispatch_program_refresh_for_epg_ids(epg_ids):
     """
     Queue guide/program refresh for newly assigned EPGData rows.
@@ -2926,108 +2609,6 @@ def dispatch_program_refresh_for_epg_ids(epg_ids):
                 dispatched += 1
 
     return dispatched
-
-
-@shared_task(time_limit=3600, soft_time_limit=3500)
-def fetch_sd_mapped_guide_batch(source_id, force=False, _defer_retry=0):
-    """
-    Fetch Schedules Direct guide data for all mapped stations on one source.
-
-    Used when bulk EPG assignment would otherwise queue many per-EPG tasks.
-    """
-    try:
-        source = EPGSource.objects.get(id=source_id)
-    except EPGSource.DoesNotExist:
-        logger.error(f"EPGSource {source_id} not found for SD mapped guide batch")
-        return
-
-    if source.source_type != 'schedules_direct':
-        return "Not a Schedules Direct source"
-
-    if not acquire_task_lock('sd_mapped_guide_fetch', source_id):
-        if _defer_retry < SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES:
-            logger.info(
-                f"SD mapped guide batch for source {source_id} already in progress, "
-                f"deferring retry {_defer_retry + 1}/"
-                f"{SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES}"
-            )
-            fetch_sd_mapped_guide_batch.apply_async(
-                args=[source_id],
-                kwargs={
-                    'force': force,
-                    '_defer_retry': _defer_retry + 1,
-                },
-                countdown=SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
-            )
-            return "Deferred - batch already in progress"
-        logger.warning(
-            f"SD mapped guide batch for source {source_id} still locked after "
-            f"{_defer_retry} deferrals; giving up"
-        )
-        return "Task already running"
-
-    lock_renewer = TaskLockRenewer('sd_mapped_guide_fetch', source_id)
-    lock_renewer.start()
-    try:
-        logger.info(f"Fetching Schedules Direct guide for mapped stations (source: {source.name})")
-        fetch_schedules_direct(source, mapped_guide_batch=True, force=force)
-        return "SD mapped guide batch complete"
-    finally:
-        lock_renewer.stop()
-        release_task_lock('sd_mapped_guide_fetch', source_id)
-
-
-@shared_task(time_limit=3600, soft_time_limit=3500)
-def fetch_sd_guide_for_epg(epg_id, force=False, _defer_retry=0):
-    """
-    Fetch Schedules Direct guide data for one mapped EPG entry (channel map flow).
-
-    Skips when ProgramData already exists so additional channels sharing the
-    same EPGData / tvg_id do not trigger redundant API calls.
-    """
-    epg = EPGData.objects.select_related('epg_source').filter(id=epg_id).first()
-    if not epg or not epg.epg_source or epg.epg_source.source_type != 'schedules_direct':
-        return "Not a Schedules Direct EPG entry"
-
-    if not force and ProgramData.objects.filter(epg_id=epg_id).exists():
-        logger.info(f"SD guide fetch skipped for EPG {epg_id}: ProgramData already present")
-        return "Guide data already present"
-
-    source_id = epg.epg_source_id
-    if is_task_lock_held('sd_mapped_guide_fetch', source_id):
-        if _defer_retry < SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES:
-            logger.info(
-                f"SD mapped batch in progress for source {source_id}; "
-                f"deferring single-EPG fetch for {epg_id} "
-                f"(retry {_defer_retry + 1}/{SD_MAPPED_GUIDE_FETCH_DEFER_MAX_RETRIES})"
-            )
-            fetch_sd_guide_for_epg.apply_async(
-                args=[epg_id],
-                kwargs={
-                    'force': force,
-                    '_defer_retry': _defer_retry + 1,
-                },
-                countdown=SD_MAPPED_GUIDE_BATCH_DEFER_SECONDS,
-            )
-            return "Deferred - mapped batch in progress"
-        logger.warning(
-            f"SD mapped batch still running for source {source_id} after "
-            f"{_defer_retry} deferrals; proceeding with single-EPG fetch for {epg_id}"
-        )
-
-    if not acquire_task_lock('parse_epg_programs', epg_id):
-        logger.info(f"SD guide fetch for EPG {epg_id} already in progress, skipping duplicate task")
-        return "Task already running"
-
-    lock_renewer = TaskLockRenewer('parse_epg_programs', epg_id)
-    lock_renewer.start()
-    try:
-        logger.info(f"Fetching Schedules Direct guide for EPG {epg_id} ({epg.tvg_id})")
-        fetch_schedules_direct(epg.epg_source, epg_id_only=epg_id, force=force)
-        return "SD guide fetch complete"
-    finally:
-        lock_renewer.stop()
-        release_task_lock('parse_epg_programs', epg_id)
 
 
 @shared_task(bind=True)
@@ -4388,6 +3969,8 @@ def fetch_schedules_direct(
 # -------------------------------
 # Helper parse functions
 # -------------------------------
+=======
+>>>>>>> v0.28.2
 def parse_xmltv_time(time_str):
     try:
         # Basic format validation
@@ -4431,20 +4014,6 @@ def parse_xmltv_time(time_str):
         raise
 
 
-def parse_schedules_direct_time(time_str):
-    try:
-        dt_obj = datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%SZ')
-        return timezone.make_aware(dt_obj, timezone=dt_timezone.utc)
-    except Exception as e:
-        logger.error(f"Error parsing Schedules Direct time '{time_str}': {e}", exc_info=True)
-        raise
-
-
-# Re-export from utils to preserve backward compatibility for any callers
-from apps.epg.utils import extract_season_episode_from_description, _ONSCREEN_RE  # noqa: F401
-
-
-# Helper function to extract custom properties - moved to a separate function to clean up the code
 def extract_custom_properties(prog):
     # Create a new dictionary for each call
     custom_props = {}
