@@ -3966,11 +3966,7 @@ def fetch_schedules_direct(
     logger.info(f"Schedules Direct fetch complete for source: {source.name}")
 
 
-# -------------------------------
-# Helper parse functions
-# -------------------------------
-=======
->>>>>>> v0.28.2
+
 def parse_xmltv_time(time_str):
     try:
         # Basic format validation
