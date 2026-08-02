@@ -68,3 +68,14 @@ def get_stream_extra_data(stream_id):
         'http_origin': getattr(stream, 'http_origin', None),
         'custom_headers': getattr(stream, 'custom_headers', None)
     }
+
+
+def clear_proxy_caches():
+    """Clear all process-local LRU caches for live proxy data."""
+    get_channel_name.cache_clear()
+    get_stream_name.cache_clear()
+    get_channel_ssl_verify.cache_clear()
+    get_stream_profile_data.cache_clear()
+    get_user_agent_data.cache_clear()
+    get_stream_extra_data.cache_clear()
+

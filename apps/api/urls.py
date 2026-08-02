@@ -17,10 +17,6 @@ urlpatterns = [
     path('catchup/', include(('apps.timeshift.api_urls', 'catchup'), namespace='catchup')),
     path('backups/', include(('apps.backups.api_urls', 'backups'), namespace='backups')),
     path('connect/', include(('apps.connect.api_urls', 'connect'), namespace='connect')),
-    # path('output/', include(('apps.output.api_urls', 'output'), namespace='output')),
-    #path('player/', include(('apps.player.api_urls', 'player'), namespace='player')),
-    #path('settings/', include(('apps.settings.api_urls', 'settings'), namespace='settings')),
-    #path('streams/', include(('apps.streams.api_urls', 'streams'), namespace='streams')),
 
 
 

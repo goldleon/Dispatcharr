@@ -20,6 +20,7 @@ import argparse
 from typing import Optional, Dict, List, Set, Deque
 import sys
 import os
+from collections import OrderedDict
 from apps.proxy.config import HLSConfig as Config
 from core.utils import build_upstream_headers
 
@@ -41,7 +42,7 @@ class StreamBuffer:
     """
     
     def __init__(self):
-        self.buffer: Dict[int, bytes] = {}  # Maps sequence numbers to segment data
+        self.buffer: Dict[int, bytes] = OrderedDict()  # Maps sequence numbers to segment data
         self.manifest_buffer = None        # Stores current manifest content
         self.lock = Semaphore(1)
 
@@ -52,13 +53,9 @@ class StreamBuffer:
     def __setitem__(self, key: int, value: bytes):
         """Store segment data by sequence number"""
         self.buffer[key] = value
-        # Cleanup old segments if we exceed MAX_SEGMENTS
-        if len(self.buffer) > Config.MAX_SEGMENTS:
-            keys = sorted(self.buffer.keys())
-            # Keep the most recent MAX_SEGMENTS
-            to_remove = keys[:-Config.MAX_SEGMENTS]
-            for k in to_remove:
-                del self.buffer[k]
+        # Cleanup old segments if we exceed MAX_SEGMENTS (FIFO order)
+        while len(self.buffer) > Config.MAX_SEGMENTS:
+            self.buffer.popitem(last=False)
 
     def __contains__(self, key: int) -> bool:
         """Check if sequence number exists in buffer"""

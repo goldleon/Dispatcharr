@@ -996,12 +996,10 @@ class MultiWorkerVODConnectionManager:
 
     def _get_worker_id(self):
         """Get unique worker ID for this process"""
-        import os
-        import socket
         try:
             # Use combination of hostname and PID for unique worker ID
             return f"{socket.gethostname()}-{os.getpid()}"
-        except:
+        except Exception:
             import random
             return f"worker-{random.randint(1000, 9999)}"
 
@@ -1033,16 +1031,13 @@ class MultiWorkerVODConnectionManager:
             return 0
         try:
             sessions_key = PROFILE_SESSIONS_KEY.format(profile_id=m3u_profile_id)
-            connections_key = PROFILE_CONNECTIONS_KEY.format(profile_id=m3u_profile_id)
             current_time = time.time()
-            # Atomic purge and count from sessions ZSET
+            # Atomic purge and count from sessions ZSET (single source of truth)
             pipeline = self.redis_client.pipeline()
             pipeline.zremrangebyscore(sessions_key, "-inf", current_time)
             pipeline.zcard(sessions_key)
             _, count = pipeline.execute()
             
-            # Sync connections count key with ZSET
-            self.redis_client.set(connections_key, str(count))
             return int(count)
         except Exception as e:
             logger.error(f"Error checking profile count: {e}")

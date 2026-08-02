@@ -1,7 +1,8 @@
-from django.db.models.signals import pre_delete
+from django.db.models.signals import pre_delete, post_save, post_delete
 from django.dispatch import receiver
 from django.apps import apps
 import logging
+from apps.proxy.live_proxy.cache import clear_proxy_caches
 
 logger = logging.getLogger(__name__)
 
@@ -21,3 +22,12 @@ def cleanup_proxy_servers(sender, **kwargs):
         logger.info("Proxy servers cleaned up successfully")
     except Exception as e:
         logger.error(f"Error during proxy server cleanup: {e}")
+
+
+@receiver([post_save, post_delete])
+def invalidate_proxy_cache_on_model_change(sender, **kwargs):
+    """Invalidate process-local LRU caches when models affecting proxy stream config change."""
+    sender_name = getattr(sender, '__name__', '')
+    if sender_name in ('Channel', 'Stream', 'StreamProfile', 'UserAgent'):
+        clear_proxy_caches()
+

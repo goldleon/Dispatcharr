@@ -55,8 +55,8 @@ from typing import Any, Callable
 
 from django.conf import settings
 from django.db import models
-from django.utils import timezone
-from packaging import version
+import re
+
 
 from version import __version__
 
@@ -122,12 +122,13 @@ CONDITION_CHECKS: dict[str, Callable] = {
 # Version Utilities
 # ─────────────────────────────
 
-def parse_version(version_str: str | None) -> version.Version | None:
-    """Parse a version string, returning None if invalid or empty."""
+def parse_version(version_str: str | None) -> tuple[int, ...] | None:
+    """Parse a version string into a tuple of integers, returning None if invalid or empty."""
     if not version_str:
         return None
     try:
-        return version.parse(version_str)
+        nums = tuple(map(int, re.findall(r'\d+', version_str)))
+        return nums if nums else None
     except Exception:
         return None
 

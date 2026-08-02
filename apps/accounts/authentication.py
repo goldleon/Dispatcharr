@@ -95,7 +95,11 @@ class ApiKeyAuthentication(authentication.BaseAuthentication):
 
 class QueryParamJWTAuthentication(JWTAuthentication):
     """Reads a JWT from the `token` query parameter. Used for media endpoints
-    where the browser cannot set Authorization headers (e.g. <video src>)."""
+    where the browser cannot set Authorization headers (e.g. <video src>).
+
+    Security Note: Query string tokens are logged by HTTP proxies and web servers.
+    HTTPS should be enforced to protect tokens in transit.
+    """
 
     def authenticate(self, request):
         params = getattr(request, "query_params", request.GET)

@@ -777,8 +777,7 @@ def check_for_version_update():
     This checks if a stable release is available so dev users know when to upgrade.
     """
     import requests
-    from datetime import datetime, timezone
-    from packaging import version as pkg_version
+    import re
     from version import __version__, __timestamp__
     from core.models import SystemNotification
     from core.utils import dispatcharr_http_headers, send_websocket_notification
@@ -927,8 +926,8 @@ def check_for_version_update():
                 return
 
             # Compare versions
-            current = pkg_version.parse(__version__)
-            latest = pkg_version.parse(latest_version)
+            current = tuple(map(int, re.findall(r'\d+', __version__)))
+            latest = tuple(map(int, re.findall(r'\d+', latest_version)))
             if latest > current:
                 logger.info(f"New stable version available: {latest_version} (current: {__version__})")
 

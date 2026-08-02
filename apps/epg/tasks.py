@@ -26,8 +26,9 @@ from core.models import UserAgent, CoreSettings
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from .models import EPGSource, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
+from .models import EPGSource, EPGSourceIndex, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
 from core.utils import (
+    RedisClient,
     acquire_task_lock,
     is_task_lock_held,
     release_task_lock,
@@ -36,10 +37,10 @@ from core.utils import (
     cleanup_memory,
     log_system_event,
     build_upstream_headers,
+    _is_celery_worker_context,
 )
 
 import gevent
-from .models import EPGSource, EPGSourceIndex, EPGData, ProgramData, SDScheduleMD5, SDProgramMD5
 from apps.epg.utils import (
     _ONSCREEN_RE,
     extract_season_episode_from_description,
@@ -62,17 +63,6 @@ from apps.epg.sd_tasks import (
     fetch_sd_guide_for_epg,
     fetch_sd_mapped_guide_batch,
     parse_schedules_direct_time,
-)
-from core.utils import (
-    RedisClient,
-    acquire_task_lock,
-    is_task_lock_held,
-    release_task_lock,
-    TaskLockRenewer,
-    cleanup_memory,
-    log_system_event,
-    build_upstream_headers,
-    _is_celery_worker_context,
 )
 
 logger = logging.getLogger(__name__)

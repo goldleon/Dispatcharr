@@ -5,36 +5,12 @@ import signal as _signal
 import stat
 import time
 from django.conf import settings
-from .base import IntegrationHandler
+class ScriptHandler:
+    def __init__(self, integration, subscription, payload):
+        self.integration = integration
+        self.subscription = subscription
+        self.payload = payload
 
-
-import subprocess
-
-def _run_script(path, env, timeout):
-    try:
-        res = subprocess.run(
-            [path],
-            env=env,
-            capture_output=True,
-            timeout=timeout,
-            text=True,
-            errors='replace'
-        )
-        return res.returncode, res.stdout, res.stderr
-    except subprocess.TimeoutExpired as e:
-        raise TimeoutError(f"Script exceeded {timeout}s") from e
-
-
-def _is_path_allowed(real_path: str) -> bool:
-    # Ensure path is within one of the allowed directories
-    for base in getattr(settings, "CONNECT_ALLOWED_SCRIPT_DIRS", []):
-        base_abs = os.path.abspath(base) + os.sep
-        if real_path.startswith(base_abs):
-            return True
-    return False
-
-
-class ScriptHandler(IntegrationHandler):
     def execute(self):
         raw_path = self.integration.config.get("path")
         if not raw_path:

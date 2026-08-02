@@ -18,8 +18,6 @@ _REDIS_TLS_HINT = " (TLS is enabled — verify certificate paths and that Redis 
 
 logger = logging.getLogger(__name__)
 
-# Import the command detector
-from .command_utils import is_management_command
 
 
 def dispatcharr_user_agent():
@@ -102,17 +100,8 @@ def custom_properties_as_dict(value):
     return {}
 
 
-def ensure_custom_properties_dict(value):
-    """
-    Return a dict for read/merge/bulk-write paths. Dict values pass through
-    without re-parsing. Use model ``save()`` (not this) as the canonical
-    normalizer for ORM writes that go through ``save()``.
-    """
-    if isinstance(value, dict):
-        return value
-    if value is None:
-        return {}
-    return custom_properties_as_dict(value)
+ensure_custom_properties_dict = custom_properties_as_dict
+
 
 
 class RedisClient:

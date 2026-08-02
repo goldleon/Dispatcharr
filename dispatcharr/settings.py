@@ -269,7 +269,7 @@ else:
             ),
             "NAME": os.environ.get("POSTGRES_DB", "dispatcharr"),
             "USER": os.environ.get("POSTGRES_USER", "dispatch"),
-            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "secret"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD") or ("secret" if DEBUG else ""),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": int(os.environ.get("POSTGRES_PORT", 5432)),
             "CONN_MAX_AGE": DATABASE_CONN_MAX_AGE,
@@ -277,6 +277,11 @@ else:
             "OPTIONS": _pg_options,
         }
     }
+
+    if not os.environ.get("POSTGRES_PASSWORD") and not DEBUG:
+        raise ImproperlyConfigured(
+            "POSTGRES_PASSWORD is not set in environment or .env file."
+        )
 
     if not _use_geventpool_db:
         print(

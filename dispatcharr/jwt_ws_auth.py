@@ -73,6 +73,13 @@ async def get_user_from_token(raw_token):
 
 
 class JWTAuthMiddleware(BaseMiddleware):
+    """
+    WebSocket authentication middleware reading JWT tokens from query parameters (?token=).
+
+    Security Note: Query string tokens are logged by HTTP proxies and web servers.
+    HTTPS/WSS should be enforced to protect tokens in transit.
+    """
+
     async def __call__(self, scope, receive, send):
         try:
             query_string = parse_qs(scope["query_string"].decode())
