@@ -37,10 +37,12 @@ function scheduleRecordingFetch() {
 
 export const WebsocketProvider = ({ children }) => {
   const [isReady, setIsReady] = useState(false);
+  const isReadyRef = useRef(false);
   const [val, setVal] = useState(null);
   const ws = useRef(null);
   const reconnectTimerRef = useRef(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const reconnectAttemptsRef = useRef(0);
   const [connectionError, setConnectionError] = useState(null);
   const maxReconnectAttempts = 5;
   const initialBackoffDelay = 1000; // 1 second initial delay
@@ -53,13 +55,27 @@ export const WebsocketProvider = ({ children }) => {
 
   const updatePlaylist = usePlaylistsStore((s) => s.updatePlaylist);
 
+  const updateIsReady = useCallback((ready) => {
+    isReadyRef.current = ready;
+    setIsReady(ready);
+  }, []);
+
+  const updateReconnectAttempts = useCallback((attempts) => {
+    const nextAttempts =
+      typeof attempts === 'function'
+        ? attempts(reconnectAttemptsRef.current)
+        : attempts;
+    reconnectAttemptsRef.current = nextAttempts;
+    setReconnectAttempts(nextAttempts);
+  }, []);
+
   // Calculate reconnection delay with exponential backoff
   const getReconnectDelay = useCallback(() => {
     return Math.min(
-      initialBackoffDelay * Math.pow(1.5, reconnectAttempts),
+      initialBackoffDelay * Math.pow(1.5, reconnectAttemptsRef.current),
       30000
     ); // max 30 seconds
-  }, [reconnectAttempts]);
+  }, []);
 
   // Clear any existing reconnect timers
   const clearReconnectTimer = useCallback(() => {
@@ -109,7 +125,7 @@ export const WebsocketProvider = ({ children }) => {
 
     try {
       console.log(
-        `Attempting WebSocket connection (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})...`
+        `Attempting WebSocket connection (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})...`
       );
 
       // Use the function to get the correct WebSocket URL
@@ -121,9 +137,9 @@ export const WebsocketProvider = ({ children }) => {
 
       socket.onopen = () => {
         console.log('WebSocket connected successfully');
-        setIsReady(true);
+        updateIsReady(true);
         setConnectionError(null);
-        setReconnectAttempts(0);
+        updateReconnectAttempts(0);
       };
 
       socket.onerror = (error) => {
@@ -131,7 +147,7 @@ export const WebsocketProvider = ({ children }) => {
 
         // Don't show error notification on initial page load,
         // only show it after a connection was established then lost
-        if (reconnectAttempts > 0 || isReady) {
+        if (reconnectAttemptsRef.current > 0 || isReadyRef.current) {
           setConnectionError('Failed to connect to WebSocket server.');
         } else {
           console.log('Initial connection attempt failed, will retry...');
@@ -140,21 +156,21 @@ export const WebsocketProvider = ({ children }) => {
 
       socket.onclose = (event) => {
         console.warn('WebSocket connection closed', event);
-        setIsReady(false);
+        updateIsReady(false);
 
         // Only attempt reconnect if we haven't reached max attempts
-        if (reconnectAttempts < maxReconnectAttempts) {
+        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
           const delay = getReconnectDelay();
           setConnectionError(
             `Connection lost. Reconnecting in ${Math.ceil(delay / 1000)} seconds...`
           );
           console.log(
-            `Scheduling reconnect in ${delay}ms (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})...`
+            `Scheduling reconnect in ${delay}ms (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})...`
           );
 
           // Store timer reference so we can cancel it if needed
           reconnectTimerRef.current = setTimeout(() => {
-            setReconnectAttempts((prev) => prev + 1);
+            updateReconnectAttempts((prev) => prev + 1);
             connectWebSocket();
           }, delay);
         } else {
@@ -1014,20 +1030,20 @@ export const WebsocketProvider = ({ children }) => {
       setConnectionError(`WebSocket error: ${error.message}`);
 
       // Schedule a reconnect if we haven't reached max attempts
-      if (reconnectAttempts < maxReconnectAttempts) {
+      if (reconnectAttemptsRef.current < maxReconnectAttempts) {
         const delay = getReconnectDelay();
         reconnectTimerRef.current = setTimeout(() => {
-          setReconnectAttempts((prev) => prev + 1);
+          updateReconnectAttempts((prev) => prev + 1);
           connectWebSocket();
         }, delay);
       }
     }
   }, [
-    reconnectAttempts,
     clearReconnectTimer,
     getReconnectDelay,
     getWebSocketUrl,
-    isReady,
+    updateIsReady,
+    updateReconnectAttempts,
   ]);
 
   // Initial connection and cleanup
@@ -1042,7 +1058,7 @@ export const WebsocketProvider = ({ children }) => {
       ws.current.onclose = null;
       ws.current.close();
       ws.current = null;
-      setIsReady(false);
+      updateIsReady(false);
     }
 
     return () => {
