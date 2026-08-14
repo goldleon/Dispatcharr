@@ -101,12 +101,24 @@ def _refresh_build_ttl(redis, base_key, lock_ttl):
 def _stream_ready(redis, base_key):
     offset = 0
     chunks_key = _chunks_key(base_key)
-    while True:
-        chunk = redis.lindex(chunks_key, offset)
-        if chunk is None:
-            break
-        yield _decode_chunk(chunk)
-        offset += 1
+    if hasattr(redis, "lrange"):
+        batch_size = 100
+        while True:
+            chunks = redis.lrange(chunks_key, offset, offset + batch_size - 1)
+            if not chunks:
+                break
+            for chunk in chunks:
+                yield _decode_chunk(chunk)
+            offset += len(chunks)
+            if len(chunks) < batch_size:
+                break
+    else:
+        while True:
+            chunk = redis.lindex(chunks_key, offset)
+            if chunk is None:
+                break
+            yield _decode_chunk(chunk)
+            offset += 1
 
 
 def _stream_build(redis, base_key, source, cache_ttl, lock_ttl):
@@ -155,12 +167,22 @@ def _stream_follow(redis, base_key, source, cache_ttl, lock_ttl, poll_interval, 
     lock_key = _lock_key(base_key)
 
     while True:
-        chunk = redis.lindex(chunks_key, offset)
-        if chunk is not None:
-            idle_polls = 0
-            yield _decode_chunk(chunk)
-            offset += 1
-            continue
+        if hasattr(redis, "lrange"):
+            batch_size = 100
+            chunks = redis.lrange(chunks_key, offset, offset + batch_size - 1)
+            if chunks:
+                idle_polls = 0
+                for chunk in chunks:
+                    yield _decode_chunk(chunk)
+                offset += len(chunks)
+                continue
+        else:
+            chunk = redis.lindex(chunks_key, offset)
+            if chunk is not None:
+                idle_polls = 0
+                yield _decode_chunk(chunk)
+                offset += 1
+                continue
 
         status = _get_status(redis, base_key)
         if status == STATUS_READY:

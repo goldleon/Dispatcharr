@@ -2094,13 +2094,18 @@ class ProxyServer:
                                     # Defer cleanup if we still have active clients — give the
                                     # new owner time to spin up its own stream before we tear
                                     # ours down, so viewers don't get disconnected.
-                                    has_clients = (
-                                        channel_id in self.client_managers
-                                        and self.client_managers[channel_id].get_client_count() > 0
+                                    client_count = (
+                                        self.client_managers[channel_id].get_client_count()
+                                        if channel_id in self.client_managers
+                                        else 0
                                     )
+                                    try:
+                                        has_clients = int(client_count) > 0
+                                    except (TypeError, ValueError):
+                                        has_clients = bool(client_count)
                                     if has_clients:
                                         logger.warning(
-                                            f"Ownership lost for {channel_id} but {self.client_managers[channel_id].get_client_count()} "
+                                            f"Ownership lost for {channel_id} but {client_count} "
                                             f"client(s) still connected — deferring cleanup to next cycle"
                                         )
                                         continue

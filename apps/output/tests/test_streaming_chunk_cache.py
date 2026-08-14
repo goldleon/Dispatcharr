@@ -66,6 +66,12 @@ class FakeRedis:
             return items[offset]
         return None
 
+    def lrange(self, key, start, end):
+        items = self._lists.get(key, [])
+        if end == -1:
+            return items[start:]
+        return items[start:end + 1]
+
     def llen(self, key):
         return len(self._lists.get(key, []))
 
