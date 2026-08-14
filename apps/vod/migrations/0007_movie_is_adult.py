@@ -47,7 +47,7 @@ def noop_reverse(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('vod', '0004_m3uepisoderelation_series_relation'),
+        ('vod', '0006_alter_id_maxlength_255'),
     ]
 
     operations = [

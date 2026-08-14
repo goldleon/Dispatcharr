@@ -11,7 +11,7 @@ from apps.vod.models import M3UMovieRelation, Movie
 
 
 def _load_backfill():
-    path = Path(__file__).resolve().parents[1] / "migrations" / "0005_movie_is_adult.py"
+    path = Path(__file__).resolve().parents[1] / "migrations" / "0007_movie_is_adult.py"
     spec = importlib.util.spec_from_file_location("vod_movie_is_adult_migration", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
