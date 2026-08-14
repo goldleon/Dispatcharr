@@ -6,6 +6,8 @@ import logging
 import re
 import time
 import os
+import requests
+from datetime import datetime, timezone
 from core.utils import RedisClient, send_websocket_update, acquire_task_lock, release_task_lock
 from apps.proxy.live_proxy.channel_status import build_live_channel_stats_data
 from apps.m3u.models import M3UAccount
@@ -778,6 +780,7 @@ def check_for_version_update():
     """
     import requests
     import re
+    from datetime import datetime, timezone
     from version import __version__, __timestamp__
     from core.models import SystemNotification
     from core.utils import dispatcharr_http_headers, send_websocket_notification

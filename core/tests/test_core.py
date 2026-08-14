@@ -902,3 +902,48 @@ class GetClientIpTests(SimpleTestCase):
             os.environ.pop("DISPATCHARR_TRUSTED_PROXIES", None)
             request = self._request("::ffff:192.168.1.50")
             self.assertEqual(get_client_ip(request), "192.168.1.50")
+
+
+class VersionUpdateCheckTests(TestCase):
+    """Verify check_for_version_update handles both prod and dev update checks cleanly."""
+
+    @patch("core.tasks.requests.get")
+    @patch("core.tasks.send_websocket_update")
+    def test_check_version_updates_prod_release(self, mock_ws, mock_get):
+        from core.tasks import check_for_version_update
+        from core.models import SystemNotification
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "tag_name": "v99.0.0",
+            "html_url": "https://github.com/Dispatcharr/Dispatcharr/releases/tag/v99.0.0",
+        }
+        mock_get.return_value = mock_resp
+
+        with patch("version.__timestamp__", None), patch("version.__version__", "0.29.0"):
+            check_for_version_update()
+
+        notification = SystemNotification.objects.filter(notification_type="version_update").first()
+        self.assertIsNotNone(notification)
+        self.assertEqual(notification.notification_key, "version-99.0.0")
+
+    @patch("core.tasks.requests.get")
+    @patch("core.tasks.send_websocket_update")
+    def test_check_version_updates_dev_build(self, mock_ws, mock_get):
+        from core.tasks import check_for_version_update
+        from core.models import SystemNotification
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "last_updated": "2026-08-15T12:00:00.000000Z",
+        }
+        mock_get.return_value = mock_resp
+
+        with patch("version.__timestamp__", "20260814000000"), patch("version.__version__", "0.29.0"):
+            check_for_version_update()
+
+        notification = SystemNotification.objects.filter(notification_type="version_update").first()
+        self.assertIsNotNone(notification)
+        self.assertIn("version-dev-", notification.notification_key)
