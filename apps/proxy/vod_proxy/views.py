@@ -12,6 +12,8 @@ from django.db import close_old_connections
 from django.http import JsonResponse, Http404, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
+from apps.vod.models import Movie, Series, Episode, M3UMovieRelation, M3UEpisodeRelation
+from apps.m3u.models import M3UAccountProfile
 from apps.proxy.vod_proxy.multi_worker_connection_manager import (
     MultiWorkerVODConnectionManager,
     infer_content_type_from_url,
@@ -565,7 +567,7 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
                 )
                 current_connections = get_profile_connection_count(profile, redis_client)
 
-                if vod_pool_has_capacity_for_profile(profile, redis_client):
+                if pool_has_capacity_for_profile(profile, redis_client):
                     logger.info(f"[PROFILE-SELECTION] Using requested profile {profile.id}: {current_connections}/{profile.max_streams} connections")
                     return (profile, current_connections)
                 logger.warning(f"[PROFILE-SELECTION] Requested profile {profile.id} is at capacity: {current_connections}/{profile.max_streams}")
@@ -587,9 +589,9 @@ def _get_m3u_profile(m3u_account, profile_id, session_id=None):
         profiles = [default_profile] + list(m3u_profiles.filter(is_default=False))
 
         for profile in profiles:
-            current_connections = int(redis_client.get(PROFILE_CONNECTIONS_KEY.format(profile_id=profile.id)) or 0)
+            current_connections = get_profile_connection_count(profile, redis_client)
 
-            if vod_pool_has_capacity_for_profile(profile, redis_client):
+            if pool_has_capacity_for_profile(profile, redis_client):
                 logger.info(f"[PROFILE-SELECTION] Selected profile {profile.id} ({profile.name}): {current_connections}/{profile.max_streams} connections")
                 return (profile, current_connections)
             else:

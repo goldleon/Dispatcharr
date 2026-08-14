@@ -80,9 +80,10 @@ class ValidateUrlNetworkTests(TestCase):
     def test_custom_timeout_passed_to_head(self, mock_head):
         mock_head.return_value = MagicMock(status_code=200)
         _validate_url("https://example.com/img.jpg", timeout=10)
-        mock_head.assert_called_once_with(
-            "https://example.com/img.jpg", timeout=10, allow_redirects=True
-        )
+        mock_head.assert_called_once()
+        self.assertEqual(mock_head.call_args.args[0], "https://example.com/img.jpg")
+        self.assertEqual(mock_head.call_args.kwargs.get("timeout"), 10)
+        self.assertEqual(mock_head.call_args.kwargs.get("allow_redirects"), True)
 
     @patch("apps.channels.tasks.requests.get")
     @patch("apps.channels.tasks.requests.head")

@@ -738,7 +738,7 @@ class InitWaitAbortTests(TestCase):
         self.assertEqual(generator._init_wait_abort_reason(server, time.time()), "client_gone")
 
     def test_abort_when_connect_stalled_without_buffer(self):
-        from apps.proxy.config import TSConfig as Config
+        from apps.proxy.live_proxy.config_helper import ConfigHelper
         generator = self._make_generator()
         server = MagicMock()
         client_manager = MagicMock()
@@ -751,7 +751,7 @@ class InitWaitAbortTests(TestCase):
         server.redis_client.hget.return_value = b"connecting"
         server.redis_client.get.return_value = None
 
-        started = time.time() - (getattr(Config, "CONNECTION_TIMEOUT", 10) + 1)
+        started = time.time() - (ConfigHelper.channel_init_grace_period() + 1)
         self.assertEqual(generator._init_wait_abort_reason(server, started), "stalled")
 
     @patch("apps.proxy.live_proxy.output.ts.generator.ConfigHelper.channel_init_grace_period", return_value=30)
