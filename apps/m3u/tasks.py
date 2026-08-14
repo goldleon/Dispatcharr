@@ -26,10 +26,14 @@ from core.utils import (
     cleanup_memory,
     ensure_custom_properties_dict,
 )
-from core.models import CoreSettings, UserAgent
+from core.models import CoreSettings
 from core.xtream_codes import Client as XCClient
 from core.utils import send_websocket_update
-from .utils import convert_js_numbered_backreferences, normalize_stream_url
+from .utils import (
+    convert_js_numbered_backreferences,
+    normalize_stream_url,
+    parse_is_adult,
+)
 
 import gevent
 
@@ -107,7 +111,7 @@ def _db_query_with_retry(fn, *, label="DB query", max_retries=2):
 
 def _get_active_m3u_account(account_id):
     return _db_query_with_retry(
-        lambda: M3UAccount.objects.get(id=account_id, is_active=True),
+        lambda: M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True),
         label=f"load active M3U account {account_id}",
     )
 
@@ -191,12 +195,7 @@ def fetch_m3u_lines(account, use_cache=False):
         if not use_cache or not os.path.exists(file_path):
             try:
                 # Try to get account-specific user agent first
-                user_agent_obj = account.get_user_agent()
-                user_agent = (
-                    user_agent_obj.user_agent
-                    if user_agent_obj
-                    else "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                )
+                user_agent = account.get_user_agent_string()
 
                 logger.debug(
                     f"Using user agent: {user_agent} for M3U account: {account.name}"
@@ -596,13 +595,6 @@ def get_case_insensitive_attr(attributes, key, default=""):
     return default
 
 
-def parse_is_adult(value):
-    try:
-        return int(value) == 1
-    except (TypeError, ValueError):
-        return False
-
-
 def parse_extinf_line(line: str) -> dict:
     """
     Parse an EXTINF line from an M3U file.
@@ -931,7 +923,7 @@ def cleanup_stale_group_relationships(account, scan_start_time):
 
 def collect_xc_streams(account_id, enabled_groups):
     """Collect all XC streams in a single API call and filter by enabled groups."""
-    account = M3UAccount.objects.get(id=account_id)
+    account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
     all_streams = []
     filtered_count = 0
 
@@ -949,7 +941,7 @@ def collect_xc_streams(account_id, enabled_groups):
             account.server_url,
             account.username,
             account.password,
-            account.get_user_agent(),
+            account.get_user_agent_string(),
         ) as xc_client:
 
             stream_url_prefix = (
@@ -1107,7 +1099,7 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
     # Ensure clean database connections for threading
     connections.close_all()
 
-    account = M3UAccount.objects.get(id=account_id)
+    account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
 
     streams_to_create = []
     streams_to_update = []
@@ -1119,7 +1111,7 @@ def process_xc_category_direct(account_id, batch, groups, hash_keys):
             account.server_url,
             account.username,
             account.password,
-            account.get_user_agent(),
+            account.get_user_agent_string(),
         ) as xc_client:
             # Log the batch details to help with debugging
             logger.debug(f"Processing XC batch: {batch}")
@@ -1323,11 +1315,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys, compiled_filt
     """
     from django.db import connections
 
-    # Ensure clean database connections for threading
-    connections.close_all()
-
-    account = M3UAccount.objects.get(id=account_id)
-    batch_now = timezone.now()
+    account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
 
     if compiled_filters is None:
         compiled_filters = _compile_m3u_stream_filters(account.filters.order_by("order"))
@@ -1552,7 +1540,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys, compiled_filt
 
 
 def cleanup_streams(account_id, scan_start_time=timezone.now):
-    account = M3UAccount.objects.get(id=account_id, is_active=True)
+    account = M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True)
     existing_groups = ChannelGroup.objects.filter(
         m3u_accounts__m3u_account=account,
         m3u_accounts__enabled=True,
@@ -1622,7 +1610,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
     lock_renewer.start()
 
     try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        account = M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True)
     except M3UAccount.DoesNotExist:
         lock_renewer.stop()
         release_task_lock("refresh_m3u_account_groups", account_id)
@@ -1679,47 +1667,7 @@ def refresh_m3u_groups(account_id, use_cache=False, full_refresh=False, scan_sta
             try:
                 # Debug the user agent issue
                 logger.debug(f"Getting user agent for account {account.id}")
-
-                # Use a hardcoded user agent string to avoid any issues with object structure
-                user_agent_string = (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                )
-
-                try:
-                    # Try to get the user agent directly from the database
-                    if account.user_agent_id:
-                        ua_obj = UserAgent.objects.get(id=account.user_agent_id)
-                        if (
-                            ua_obj
-                            and hasattr(ua_obj, "user_agent")
-                            and ua_obj.user_agent
-                        ):
-                            user_agent_string = ua_obj.user_agent
-                            logger.debug(
-                                f"Using user agent from account: {user_agent_string}"
-                            )
-                    else:
-                        # Get default user agent from CoreSettings
-                        default_ua_id = CoreSettings.get_default_user_agent_id()
-                        logger.debug(
-                            f"Default user agent ID from settings: {default_ua_id}"
-                        )
-                        if default_ua_id:
-                            ua_obj = UserAgent.objects.get(id=default_ua_id)
-                            if (
-                                ua_obj
-                                and hasattr(ua_obj, "user_agent")
-                                and ua_obj.user_agent
-                            ):
-                                user_agent_string = ua_obj.user_agent
-                                logger.debug(
-                                    f"Using default user agent: {user_agent_string}"
-                                )
-                except Exception as e:
-                    logger.warning(
-                        f"Error getting user agent, using fallback: {str(e)}"
-                    )
-
+                user_agent_string = account.get_user_agent_string()
                 logger.debug(f"Final user agent string: {user_agent_string}")
             except Exception as e:
                 user_agent_string = (
@@ -2157,7 +2105,7 @@ def sync_auto_channels(account_id, scan_start_time=None):
     rename_regex_timeout = 0.1
 
     try:
-        account = M3UAccount.objects.get(id=account_id)
+        account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
         logger.info(f"Starting auto channel sync for M3U account {account.name}")
 
         # Always use scan_start_time as the cutoff for last_seen
@@ -3262,7 +3210,7 @@ def refresh_account_profiles(account_id):
     import time
 
     try:
-        account = M3UAccount.objects.get(id=account_id, is_active=True)
+        account = M3UAccount.objects.select_related("user_agent").get(id=account_id, is_active=True)
 
         if account.account_type != M3UAccount.Types.XC:
             logger.debug(f"Account {account_id} is not XC type, skipping profile refresh")
@@ -3270,10 +3218,12 @@ def refresh_account_profiles(account_id):
 
         from apps.m3u.models import M3UAccountProfile
 
+        # select_related so M3UAccountProfile.save()'s account_type check
+        # (see model's exp_date sync) doesn't issue a query per profile.
         profiles = M3UAccountProfile.objects.filter(
             m3u_account=account,
             is_active=True
-        )
+        ).select_related("m3u_account")
 
         if not profiles.exists():
             logger.info(f"No active profiles found for account {account.name}")
@@ -3281,13 +3231,9 @@ def refresh_account_profiles(account_id):
 
         # Get user agent for this account
         try:
-            user_agent_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            if account.user_agent_id:
-                from core.models import UserAgent
-                ua_obj = UserAgent.objects.get(id=account.user_agent_id)
-                if ua_obj and hasattr(ua_obj, "user_agent") and ua_obj.user_agent:
-                    user_agent_string = ua_obj.user_agent
+            user_agent_string = account.get_user_agent_string()
         except Exception as e:
+            user_agent_string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             logger.warning(f"Error getting user agent, using fallback: {str(e)}")
         logger.debug(f"Using user agent for profile refresh: {user_agent_string}")
         # Get rate limiting delay from settings
@@ -3373,7 +3319,9 @@ def refresh_account_info(profile_id):
             from apps.m3u.models import M3UAccountProfile
             import re
 
-            profile = M3UAccountProfile.objects.get(id=profile_id)
+            profile = M3UAccountProfile.objects.select_related(
+                "m3u_account__user_agent"
+            ).get(id=profile_id)
             account = profile.m3u_account
 
             if account.account_type != M3UAccount.Types.XC:
@@ -3388,7 +3336,7 @@ def refresh_account_info(profile_id):
                 transformed_url,
                 transformed_username,
                 transformed_password,
-                account.get_user_agent(),
+                account.get_user_agent_string(),
             )
             # Authenticate and get account info
             auth_result = client.authenticate()
@@ -3679,7 +3627,7 @@ def _refresh_single_m3u_account_impl(account_id):
 
             # XC accounts can have empty extinf_data but valid groups
             try:
-                account = M3UAccount.objects.get(id=account_id)
+                account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
                 is_xc_account = account.account_type == M3UAccount.Types.XC
             except M3UAccount.DoesNotExist:
                 is_xc_account = False

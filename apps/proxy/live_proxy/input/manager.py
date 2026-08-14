@@ -101,6 +101,11 @@ class StreamManager:
 
         # C4: Use a single greenlet instead of cascading threading.Timers
         self._buffer_check_greenlet = None
+
+        # Recovery flags the health monitor raises for the main loop.
+        self.needs_reconnect = False
+        self.needs_stream_switch = False
+        self.last_health_action_time = 0
         self.stopping = False
         self.stop_requested = False
 
@@ -584,6 +589,18 @@ class StreamManager:
                             # Normal shutdown requested
                             return
 
+                        if self.needs_reconnect:
+                            # Health monitor asked for a same-URL reconnect. Clear the
+                            # flag and tear the old socket down so the next establish
+                            # does not orphan the reader thread, then fall through to
+                            # the normal failure accounting. Repeated health reconnects
+                            # count toward max_retries like any other URL failure.
+                            self.needs_reconnect = False
+                            logger.info(
+                                f"Health monitor requested reconnect for channel: {self.channel_id}"
+                            )
+                            self._close_socket()
+
                         self.connected = False
                         failures = self._record_connection_failure()
 
@@ -792,7 +809,7 @@ class StreamManager:
                     stream_profile = channel.get_stream_profile()
 
                 # Build and start transcode command
-                self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent)
+                self.transcode_cmd = stream_profile.build_command(self.url, self.user_agent, channel.id)
 
                 # Store stream command for efficient log parser routing
                 self.stream_command = stream_profile.command
@@ -1385,7 +1402,8 @@ class StreamManager:
         try:
             # Both transcode and HTTP now use the same subprocess/socket approach
             # This gives us perfect control: check flags between chunks, timeout just returns False
-            while self.running and self.connected and not self.stop_requested and not self.needs_stream_switch:
+            while (self.running and self.connected and not self.stop_requested
+                   and not self.needs_stream_switch and not self.needs_reconnect):
                 if self.fetch_chunk():
                     self.last_data_time = time.time()
                 else:
@@ -1595,11 +1613,6 @@ class StreamManager:
         from django.db import connection
         consecutive_unhealthy_checks = 0
         max_unhealthy_checks = 3
-
-        # Add flags for the main loop to check
-        self.needs_reconnect = False
-        self.needs_stream_switch = False
-        self.last_health_action_time = 0
         action_cooldown = 30  # Prevent rapid recovery attempts
 
         while self.running:

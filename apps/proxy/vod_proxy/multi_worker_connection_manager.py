@@ -1303,10 +1303,6 @@ class MultiWorkerVODConnectionManager:
                         utc_end=utc_end,
                         offset=offset
                     )
-                    if matching_session_id:
-                        effective_session_id = matching_session_id
-                        client_id = matching_session_id
-
                 # Use matching session if found, otherwise use the provided session_id
                 if matching_session_id:
                     logger.info(f"[{client_id}] Worker {self.worker_id} - Found matching idle session: {matching_session_id}")
