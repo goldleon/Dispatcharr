@@ -97,6 +97,9 @@ class CatchupRedirectViewTests(SimpleTestCase):
         stack.enter_context(
             patch.object(views, "parse_catchup_timestamp", return_value=True)
         )
+        stack.enter_context(
+            patch.object(views, "is_catchup_enabled", return_value=True)
+        )
         is_redirect_mock = stack.enter_context(
             patch(
                 "core.models.CoreSettings.is_default_stream_profile_redirect",
