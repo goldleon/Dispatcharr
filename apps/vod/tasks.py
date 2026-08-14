@@ -13,8 +13,19 @@ from datetime import datetime
 import logging
 import json
 import re
+from core.utils import _is_celery_worker_context
 
 logger = logging.getLogger(__name__)
+
+
+def _release_task_db_connection():
+    """Return the Celery worker's DB connection to a clean state."""
+    if not _is_celery_worker_context():
+        return
+    try:
+        connections.close_all()
+    except Exception:
+        pass
 
 
 def clean_metadata_id(value):
@@ -805,10 +816,7 @@ def process_movie_batch(account, batch, categories, relations, scan_start_time=N
                 ])
 
         logger.info("Movie batch processing completed successfully!")
-        try:
-            connections.close_all()
-        except Exception:
-            pass
+        _release_task_db_connection()
         return f"Movie batch processed: {len(movies_to_create)} created, {len(movies_to_update)} updated"
 
     except Exception as e:
@@ -1172,10 +1180,7 @@ def process_series_batch(account, batch, categories, relations, scan_start_time=
                 ])
 
         logger.info("Series batch processing completed successfully!")
-        try:
-            connections.close_all()
-        except Exception:
-            pass
+        _release_task_db_connection()
         return f"Series batch processed: {len(series_to_create)} created, {len(series_to_update)} updated"
 
     except Exception as e:
@@ -1694,10 +1699,7 @@ def batch_process_episodes(account, series, episodes_data, scan_start_time=None,
         if removed_count:
             logger.info(f"Removed {removed_count} episode relations no longer present in provider for series {series.name}")
 
-    try:
-        connections.close_all()
-    except Exception:
-        pass
+    _release_task_db_connection()
     logger.info(f"Batch processed episodes: {len(episodes_to_create)} new, {len(episodes_to_update)} updated, "
                 f"{len(relations_to_create)} new relations, {len(relations_to_update)} updated relations")
 

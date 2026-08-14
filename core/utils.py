@@ -831,7 +831,10 @@ def dispatch_event_system(event_type, channel_id=None, channel_name=None, **deta
         pass
     finally:
         if _should_use_sync_websocket_send() or _is_gevent_monkey_patched():
-            close_old_connections()
+            from django.conf import settings
+            db_engine = settings.DATABASES.get("default", {}).get("ENGINE", "")
+            if "geventpool" in db_engine or "postgresql_psycopg3" in db_engine:
+                close_old_connections()
 
 
 def _dispatch_system_event_integrations(

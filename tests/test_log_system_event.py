@@ -2,10 +2,11 @@
 
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 
 
 class LogSystemEventDispatchTests(SimpleTestCase):
+    @override_settings(DATABASES={"default": {"ENGINE": "dispatcharr.db.backends.postgresql_psycopg3"}})
     @patch("django.db.close_old_connections")
     @patch("core.utils._dispatch_system_event_integrations")
     @patch("core.models.SystemEvent.objects")
@@ -28,6 +29,7 @@ class LogSystemEventDispatchTests(SimpleTestCase):
         )
         mock_close.assert_called_once()
 
+    @override_settings(DATABASES={"default": {"ENGINE": "dispatcharr.db.backends.postgresql_psycopg3"}})
     @patch("django.db.close_old_connections")
     @patch("apps.connect.utils.trigger_event")
     def test_integration_dispatch_closes_db_on_sync_path(
