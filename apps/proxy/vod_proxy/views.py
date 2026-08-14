@@ -111,7 +111,7 @@ def _find_idle_vod_session(
 
 def _vod_session_path_redirect(request, session_id, profile_id=None, user=None):
     """
-    301 to the same VOD URL with session_id in the path (or XC query string).
+    302 to the same VOD URL with session_id in the path (or XC query string).
 
     Used for both newly minted sessions and adopted idle-session matches so the
     client carries session_id on subsequent Range/seek requests.
@@ -149,7 +149,7 @@ def _vod_session_path_redirect(request, session_id, profile_id=None, user=None):
         except Exception:
             pass
 
-    return HttpResponse(status=301, headers={"Location": redirect_url})
+    return HttpResponse(status=302, headers={"Location": redirect_url})
 
 
 def _select_vod_stream(
@@ -741,6 +741,8 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         # Redirect is the active default; proxy-mode installs mint exactly
         # as before, with no extra Redis lookup on this path.
         if not session_id:
+            is_vod_proxy_path = request.path.startswith("/proxy/vod/")
+
             if CoreSettings.is_default_stream_profile_redirect():
                 # A reconnect/retry for content we're already proxying should
                 # keep using that session rather than hopping to the provider,
@@ -763,38 +765,53 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                         "[VOD-SESSION] Adopting idle session %s (skip Redirect/mint)",
                         matched_session_id,
                     )
-                    return _vod_session_path_redirect(
-                        request, matched_session_id, profile_id=profile_id, user=user
-                    )
-
-                # 301 to provider (no session mint, no slot hold, no probe).
-                # Capacity still gates provider selection.
-                selected = _select_vod_stream(
-                    content_type,
-                    content_id,
-                    preferred_m3u_account_id,
-                    preferred_stream_id,
-                    profile_id,
-                )
-                if not selected:
-                    logger.error(
-                        "[VOD-REDIRECT] No provider URL for %s %s",
+                    if is_vod_proxy_path:
+                        return _vod_session_path_redirect(
+                            request, matched_session_id, profile_id=profile_id, user=user
+                        )
+                    else:
+                        session_id = matched_session_id
+                        logger.info(
+                            f"[VOD-SESSION] XC path: adopting idle session {session_id} inline (no redirect)"
+                        )
+                else:
+                    # 302 to provider (no session mint, no slot hold, no probe).
+                    # Capacity still gates provider selection.
+                    selected = _select_vod_stream(
                         content_type,
                         content_id,
+                        preferred_m3u_account_id,
+                        preferred_stream_id,
+                        profile_id,
                     )
-                    return HttpResponse("No available stream", status=503)
-                logger.info(
-                    "[VOD-REDIRECT] Redirecting to provider URL: %s",
-                    selected["final_stream_url"],
-                )
-                close_old_connections()
-                return HttpResponseRedirect(selected["final_stream_url"])
+                    if not selected:
+                        logger.error(
+                            "[VOD-REDIRECT] No provider URL for %s %s",
+                            content_type,
+                            content_id,
+                        )
+                        return HttpResponse("No available stream", status=503)
+                    logger.info(
+                        "[VOD-REDIRECT] Redirecting to provider URL: %s",
+                        selected["final_stream_url"],
+                    )
+                    close_old_connections()
+                    return HttpResponseRedirect(selected["final_stream_url"])
 
-            new_session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
-            logger.info(f"[VOD-SESSION] Creating new session: {new_session_id}")
-            return _vod_session_path_redirect(
-                request, new_session_id, profile_id=profile_id, user=user
-            )
+            elif is_vod_proxy_path:
+                new_session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                logger.info(f"[VOD-SESSION] Creating new session: {new_session_id}")
+                return _vod_session_path_redirect(
+                    request, new_session_id, profile_id=profile_id, user=user
+                )
+            else:
+                # XC/IPTV path: skip redirect entirely and use session_id inline.
+                # IPTV players (TiviMate, Smarters, iMPlayer, etc.) never preserve query
+                # parameters across requests and strip Range headers on redirects.
+                # Skipping the redirect saves one round-trip, preserves Range headers,
+                # and lets playback start immediately.
+                session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                logger.info(f"[VOD-SESSION] XC path: using session {session_id} inline (no redirect)")
 
         # Resolve user from Redis session mapping when the streaming request
         # arrives without auth credentials (token was stripped from redirect URL).

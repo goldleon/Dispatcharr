@@ -210,7 +210,7 @@ class StreamVodRedirectTests(SimpleTestCase):
         connection manager already uses for reconnects) wins over Redirect
         and adopts that session directly instead of hopping to the provider."""
         expected = HttpResponse(
-            status=301, headers={"Location": "/proxy/vod/movie/uuid/idle_session_abc"}
+            status=302, headers={"Location": "/proxy/vod/movie/uuid/idle_session_abc"}
         )
         mock_path_redirect.return_value = expected
 
@@ -254,9 +254,75 @@ class StreamVodRedirectTests(SimpleTestCase):
             session_id=None,
         )
 
-        self.assertEqual(response.status_code, 301)
+        self.assertEqual(response.status_code, 302)
         mock_idle.assert_not_called()
         mock_select.assert_not_called()
+
+    @patch("apps.proxy.vod_proxy.views.close_old_connections")
+    @patch("apps.proxy.vod_proxy.views.MultiWorkerVODConnectionManager")
+    @patch("apps.proxy.vod_proxy.views._select_vod_stream")
+    @patch("apps.proxy.vod_proxy.views._find_idle_vod_session", return_value=None)
+    @patch(
+        "core.models.CoreSettings.is_default_stream_profile_redirect",
+        return_value=False,
+    )
+    @patch("apps.proxy.vod_proxy.views.network_access_allowed", return_value=True)
+    def test_xc_path_does_not_redirect_and_streams_inline(
+        self,
+        _network_ok,
+        _is_redirect,
+        _idle,
+        mock_select,
+        mock_manager_cls,
+        mock_close,
+    ):
+        """XC/IPTV requests (/series/... or /movie/...) must NOT redirect on first
+        request without session_id. They must stream inline to prevent IPTV players
+        (iMPlayer, TiviMate) from losing Range headers on redirects."""
+        movie = MagicMock()
+        movie.name = "Test Series Episode"
+        profile = MagicMock()
+        profile.id = 1
+        profile.max_streams = 5
+        mock_select.return_value = {
+            "content_obj": movie,
+            "m3u_account": MagicMock(name="Provider"),
+            "m3u_profile": profile,
+            "current_connections": 0,
+            "final_stream_url": "http://example.com/episode.mp4",
+        }
+
+        mock_manager = MagicMock()
+        mock_manager.stream_content_with_session.return_value = StreamingHttpResponse(
+            streaming_content=iter([b"data"]),
+            content_type="video/mp4",
+        )
+        mock_manager_cls.get_instance.return_value = mock_manager
+
+        from apps.proxy.vod_proxy.views import stream_vod
+
+        # Request to XC endpoint /series/user/pass/123.mp4 with Range header
+        request = self.factory.get(
+            "/series/hometv001/5zcjr66u5ck/67135.mp4",
+            HTTP_USER_AGENT="iMPlayer/4.1.1",
+            HTTP_RANGE="bytes=1090005338-",
+        )
+        request.user = MagicMock(is_authenticated=False)
+
+        response = stream_vod(
+            request,
+            content_type="episode",
+            content_id="c2980f52-a7e0-49c3-a7ea-f68fbca83c38",
+            session_id=None,
+        )
+
+        self.assertIsInstance(response, StreamingHttpResponse)
+        self.assertEqual(response.status_code, 200)
+        mock_manager.stream_content_with_session.assert_called_once()
+        # Verify range header was forwarded to connection manager
+        call_kwargs = mock_manager.stream_content_with_session.call_args.kwargs
+        self.assertEqual(call_kwargs["range_header"], "bytes=1090005338-")
+        mock_close.assert_called_once()
 
 
 class HeadVodRedirectTests(SimpleTestCase):
