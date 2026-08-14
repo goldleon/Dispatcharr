@@ -62,9 +62,14 @@ def _poll_wait(interval):
 
 
 def _get_redis():
-    from django_redis import get_redis_connection
+    try:
+        from django_redis import get_redis_connection
 
-    return get_redis_connection("default")
+        return get_redis_connection("default")
+    except Exception:
+        from core.utils import RedisClient
+
+        return RedisClient.get_client()
 
 
 def _get_status(redis, base_key):

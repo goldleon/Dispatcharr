@@ -46,7 +46,7 @@ def _make_manager(**overrides):
     sm.current_stream_id = 100
     sm.tried_stream_ids = {100}
     sm.last_data_time = 0.0
-    sm._buffer_check_timers = []
+    sm._buffer_check_greenlet = None
     sm.transcode_process_active = False
     sm.buffer = _Buffer()
     for key, value in overrides.items():

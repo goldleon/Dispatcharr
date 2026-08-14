@@ -696,8 +696,9 @@ class StreamManager:
             self.connected = False
 
             # C4: Kill buffer check greenlet instead of old timer list
-            if self._buffer_check_greenlet and not self._buffer_check_greenlet.dead:
-                self._buffer_check_greenlet.kill(block=False)
+            buffer_check_greenlet = getattr(self, "_buffer_check_greenlet", None)
+            if buffer_check_greenlet and not buffer_check_greenlet.dead:
+                buffer_check_greenlet.kill(block=False)
             self._buffer_check_greenlet = None
 
             # Make sure transcode process is terminated
