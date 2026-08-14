@@ -34,6 +34,11 @@ except Exception as e:
     logger.error(f"Error parsing VOD_RETRY_BACKOFF_SECONDS: {e}. Falling back to default backoff.")
     VOD_RETRY_BACKOFF_SECONDS = [0.0, 1.0, 2.5, 4.0, 8.0]
 
+# VOD streaming chunk sizes and checking cadence
+VOD_CHUNK_SIZE = 64 * 1024        # 64 KB delivery chunks (optimized for high-bitrate VOD)
+VOD_SKIP_CHUNK_SIZE = 128 * 1024  # 128 KB skip chunks
+VOD_CHECK_CADENCE_CHUNKS = 15      # Check stop signal & refresh heartbeat every 15 chunks (~1 MB)
+
 def _decode_redis_hash(data: dict) -> dict:
     """H5: Safely decode a Redis hgetall() response to str→str dict.
 
@@ -563,9 +568,16 @@ class RedisBackedVODConnection:
         state.request_count += 1
 
         try:
-            # Create local session if needed
+            # Create local session with connection pooling if needed
             if not self.local_session:
                 self.local_session = requests.Session()
+                adapter = requests.adapters.HTTPAdapter(
+                    pool_connections=10,
+                    pool_maxsize=20,
+                    max_retries=1,
+                )
+                self.local_session.mount("http://", adapter)
+                self.local_session.mount("https://", adapter)
 
             # Prepare headers
             headers = state.headers.copy()
@@ -1503,7 +1515,7 @@ class MultiWorkerVODConnectionManager:
                     stop_key = get_vod_client_stop_key(client_id)
 
                     # Use larger chunks during skip phase for better performance
-                    current_chunk_size = 128 * 1024 if skip_bytes > 0 else 8192
+                    current_chunk_size = VOD_SKIP_CHUNK_SIZE if skip_bytes > 0 else VOD_CHUNK_SIZE
                     
                     for chunk in upstream_response.iter_content(chunk_size=current_chunk_size):
 
@@ -1520,14 +1532,14 @@ class MultiWorkerVODConnectionManager:
                                     total_skipped = skip_bytes
                                     logger.info(f"[{client_id}] Manual skip completed. Starting delivery.")
                                     # Switch back to normal chunk size for delivery
-                                    current_chunk_size = 8192
+                                    current_chunk_size = VOD_CHUNK_SIZE
 
                             yield chunk
                             bytes_sent += len(chunk)
                             chunk_count += 1
 
-                            # Check for stop signal every 100 chunks
-                            if chunk_count % 100 == 0:
+                            # Check for stop signal and refresh heartbeat periodically (~1 MB)
+                            if chunk_count % VOD_CHECK_CADENCE_CHUNKS == 0:
                                 # Check if stop signal has been set
                                 if self.redis_client and self.redis_client.exists(stop_key):
                                     logger.info(f"[{client_id}] Worker {self.worker_id} - Stop signal detected, terminating stream")
@@ -1536,7 +1548,7 @@ class MultiWorkerVODConnectionManager:
                                     stop_signal_detected = True
                                     break
                                 
-                                # Heartbeat renewal: every 100 chunks (~0.8MB at 8KB chunks)
+                                # Heartbeat renewal
                                 self._refresh_profile_heartbeat(m3u_profile.id, effective_session_id)
 
                                 # Update the connection state
@@ -1685,13 +1697,13 @@ class MultiWorkerVODConnectionManager:
                                 logger.warning(f"[{client_id}] Resume attempt {resume_attempt} — range not satisfiable, stopping")
                                 break
                             # Stream resumed — yield remaining chunks
-                            for chunk in resumed_response.iter_content(chunk_size=8192):
+                            for chunk in resumed_response.iter_content(chunk_size=VOD_CHUNK_SIZE):
 
                                 if chunk:
                                     yield chunk
                                     bytes_sent += len(chunk)
                                     chunk_count += 1
-                                    if chunk_count % 100 == 0:
+                                    if chunk_count % VOD_CHECK_CADENCE_CHUNKS == 0:
                                         if self.redis_client and self.redis_client.exists(stop_key):
                                             self.redis_client.delete(stop_key)
                                             stop_signal_detected = True
