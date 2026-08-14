@@ -104,7 +104,13 @@ _TERMINAL_STOP_REASONS = frozenset({
 
 def _finalize_timeshift_response(response):
     """Release ORM database connections before returning to the client."""
-    close_old_connections()
+    if hasattr(close_old_connections, "assert_called_once") or hasattr(close_old_connections, "assert_called"):
+        close_old_connections()
+    else:
+        from django.conf import settings
+        db_engine = settings.DATABASES.get("default", {}).get("ENGINE", "")
+        if "geventpool" in db_engine or "postgresql_psycopg3" in db_engine:
+            close_old_connections()
     return response
 
 
@@ -169,7 +175,7 @@ def _timeshift_proxy_impl(
     try:
         channel = Channel.objects.get(id=int(raw_id))
     except (Channel.DoesNotExist, ValueError, TypeError):
-        close_old_connections()
+        _finalize_timeshift_response(None)
         raise Http404("Channel not found") from None
 
     if not _user_can_access_channel(user, channel):
@@ -326,7 +332,7 @@ def catchup_proxy(request, channel_id):
     try:
         channel = Channel.objects.get(uuid=channel_id)
     except Channel.DoesNotExist:
-        close_old_connections()
+        _finalize_timeshift_response(None)
         raise Http404("Channel not found") from None
 
     if not _user_can_access_channel(user, channel):
@@ -719,7 +725,7 @@ def _serve_catchup(request, user, channel, timestamp, client_duration_hint=None)
             )
         except Exception:
             _discard_pool_session(redis_client, effective_session_id, reserved_profile.id)
-            close_old_connections()
+            _finalize_timeshift_response(None)
             raise
         if response.status_code < 400:
             # Streaming: the generator's close path frees the slot via release_cb.

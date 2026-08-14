@@ -316,7 +316,7 @@ class OutputEPGXMLEscapingTest(OutputEndpointTestMixin, TestCase):
         from django.utils import timezone
         from apps.channels.models import ChannelOverride
         from apps.epg.models import ProgramData
-        from django_redis import get_redis_connection
+        from core.utils import RedisClient
 
         # This mixin normally bypasses Redis chunk caching; use the real path here.
         self._epg_cache_patch.stop()
@@ -359,7 +359,7 @@ class OutputEPGXMLEscapingTest(OutputEndpointTestMixin, TestCase):
             self.assertIn('<title>OLD PROGRAMME</title>', before)
             self.assertNotIn('<title>NEW PROGRAMME</title>', before)
 
-            redis = get_redis_connection("default")
+            redis = RedisClient.get_client()
             cached_before = list(redis.scan_iter(match="epg_content:*", count=200))
             self.assertGreater(len(cached_before), 0, "XMLTV chunk cache should be warm")
 
