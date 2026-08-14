@@ -928,7 +928,10 @@ def log_system_event(event_type, channel_id=None, channel_name=None, **details):
         # geventpool keeps checked-out connections until close(); release promptly
         # when logging from proxy greenlets/threads outside a normal request cycle.
         if _is_gevent_monkey_patched():
-            close_old_connections()
+            from django.conf import settings
+            db_engine = settings.DATABASES.get("default", {}).get("ENGINE", "")
+            if "geventpool" in db_engine or "postgresql_psycopg3" in db_engine:
+                close_old_connections()
 
 
 def _send_async(channel_layer, group, message):
