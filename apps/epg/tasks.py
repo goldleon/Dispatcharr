@@ -1776,7 +1776,7 @@ def parse_programs_for_tvg_id(epg_id, force=False, _defer_retry=0):
                     send_epg_update(epg_source.id, "parsing_programs", 100, status="error", error="No URL provided")
                     return
     
-            if not force and not Channel.objects.filter(epg_data=epg).exists():
+            if not force and not is_epg_mapped_to_channel(epg):
                 logger.info(f"No channels matched to EPG {epg.tvg_id}")
                 return
 

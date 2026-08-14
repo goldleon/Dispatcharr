@@ -53,6 +53,7 @@ else:
             "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "secret"),
             "HOST": os.environ.get("POSTGRES_HOST", "localhost"),
             "PORT": int(os.environ.get("POSTGRES_PORT", 5432)),
+            "CONN_MAX_AGE": None,
             "TEST": {
                 "NAME": "test_" + _pg_name,
                 # Match production UTF-8 so JSON programme indexes and EPG text

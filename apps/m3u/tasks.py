@@ -25,6 +25,7 @@ from core.utils import (
     log_system_event,
     cleanup_memory,
     ensure_custom_properties_dict,
+    _is_celery_worker_context,
 )
 from core.models import CoreSettings
 from core.xtream_codes import Client as XCClient
@@ -79,6 +80,8 @@ def _delete_channels_stopping_streams(channels):
 
 def _release_task_db_connection():
     """Return the Celery worker's DB connection to a clean state after ORM errors."""
+    if not _is_celery_worker_context():
+        return
     from django.db import close_old_connections
     close_old_connections()
 
@@ -1324,6 +1327,7 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys, compiled_filt
     streams_to_update = []
     streams_to_touch = []
     stream_hashes = {}
+    batch_now = timezone.now()
 
     name_max_length = Stream._meta.get_field('name').max_length
 
@@ -3100,7 +3104,7 @@ def sync_auto_channels(account_id, scan_start_time=None):
             "failed_stream_details": [],
         }
     finally:
-        connection.close()
+        _release_task_db_connection()
         logger.debug("Closed DB connection for auto channel sync")
 
 
