@@ -10,9 +10,10 @@ import requests
 import requests.exceptions
 import urllib3.exceptions
 import os
+import errno
 import mimetypes
 from urllib.parse import urlparse
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from django.http import StreamingHttpResponse, HttpResponse
 from django.db import close_old_connections
 from core.utils import RedisClient, HEADERS_TO_STRIP, build_upstream_headers
@@ -38,6 +39,58 @@ except Exception as e:
 VOD_CHUNK_SIZE = 64 * 1024        # 64 KB delivery chunks (optimized for high-bitrate VOD)
 VOD_SKIP_CHUNK_SIZE = 128 * 1024  # 128 KB skip chunks
 VOD_CHECK_CADENCE_CHUNKS = 15      # Check stop signal & refresh heartbeat every 15 chunks (~1 MB)
+
+def is_client_disconnect_error(e: BaseException) -> bool:
+    """Return True if exception is caused by downstream client disconnect (write/pipe error)."""
+    if isinstance(e, GeneratorExit):
+        return True
+    if isinstance(e, BrokenPipeError):
+        return True
+    if isinstance(e, OSError):
+        err_msg = str(e).lower()
+        if "write error" in err_msg or "broken pipe" in err_msg:
+            return True
+        if hasattr(e, "errno") and e.errno in (
+            errno.EPIPE,
+            errno.ECONNRESET,
+            errno.ESHUTDOWN,
+            errno.ECONNABORTED,
+        ):
+            return True
+    return False
+
+def parse_range_header(range_header: Optional[str], content_length: Optional[int] = None) -> Tuple[int, Optional[int]]:
+    """Parse HTTP Range header into (start_byte, end_byte).
+
+    Returns (0, None) if range_header is missing or invalid.
+    """
+    if not range_header or not isinstance(range_header, str) or not range_header.startswith("bytes="):
+        return 0, None
+
+    range_part = range_header.replace("bytes=", "").strip()
+    if "-" not in range_part:
+        return 0, None
+
+    start_str, end_str = range_part.split("-", 1)
+    start_str = start_str.strip()
+    end_str = end_str.strip()
+
+    try:
+        if not start_str and end_str:
+            # Suffix range: bytes=-N (last N bytes)
+            if content_length and content_length > 0:
+                suffix_len = int(end_str)
+                if suffix_len <= 0:
+                    return 0, None
+                start_byte = max(0, content_length - suffix_len)
+                return start_byte, content_length - 1
+            return 0, None
+
+        start_byte = int(start_str) if start_str else 0
+        end_byte = int(end_str) if end_str else None
+        return start_byte, end_byte
+    except (ValueError, TypeError):
+        return 0, None
 
 def _decode_redis_hash(data: dict) -> dict:
     """H5: Safely decode a Redis hgetall() response to str→str dict.
@@ -744,30 +797,43 @@ class RedisBackedVODConnection:
     def _validate_range_header(self, range_header: str, content_length: int):
         """Validate range header against content length"""
         try:
-            if not range_header or not range_header.startswith('bytes='):
+            if not range_header or not isinstance(range_header, str) or not range_header.startswith('bytes='):
                 return range_header
 
-            range_part = range_header.replace('bytes=', '')
+            if content_length is None or content_length <= 0:
+                return range_header
+
+            range_part = range_header.replace('bytes=', '').strip()
             if '-' not in range_part:
                 return range_header
 
             start_str, end_str = range_part.split('-', 1)
+            start_str = start_str.strip()
+            end_str = end_str.strip()
 
-            # Parse start byte
-            if start_str:
-                start_byte = int(start_str)
-                if start_byte >= content_length:
-                    return None  # Not satisfiable
-            else:
-                start_byte = 0
-
-            # Parse end byte
-            if end_str:
-                end_byte = int(end_str)
-                if end_byte >= content_length:
-                    end_byte = content_length - 1
-            else:
+            if not start_str and end_str:
+                # Suffix byte range: last N bytes
+                suffix_len = int(end_str)
+                if suffix_len <= 0:
+                    return None
+                start_byte = max(0, content_length - suffix_len)
                 end_byte = content_length - 1
+            else:
+                # Parse start byte
+                if start_str:
+                    start_byte = int(start_str)
+                    if start_byte >= content_length:
+                        return None  # Not satisfiable
+                else:
+                    start_byte = 0
+
+                # Parse end byte
+                if end_str:
+                    end_byte = int(end_str)
+                    if end_byte >= content_length:
+                        end_byte = content_length - 1
+                else:
+                    end_byte = content_length - 1
 
             # Ensure start <= end
             if start_byte > end_byte:
@@ -1467,6 +1533,12 @@ class MultiWorkerVODConnectionManager:
             # Get connection headers
             connection_headers = redis_connection.get_headers()
 
+            # Parse initial range boundaries
+            initial_start_byte, initial_end_byte = parse_range_header(
+                range_header,
+                int(connection_headers['content_length']) if connection_headers.get('content_length') else None
+            )
+
             # Create streaming generator
             def stream_generator():
                 stream_decremented = False
@@ -1500,16 +1572,9 @@ class MultiWorkerVODConnectionManager:
                     total_skipped = 0
 
                     # Check if provider ignored the Range header (Status 200 instead of 206)
-                    if upstream_response.status_code == 200 and range_header:
-                        try:
-                            if 'bytes=' in range_header:
-                                start_byte_str = range_header.replace('bytes=', '').split('-')[0]
-                                if start_byte_str:
-                                    skip_bytes = int(start_byte_str)
-                                    if skip_bytes > 0:
-                                        logger.warning(f"[{client_id}] Provider ignored Range header (Status 200). Skipping {skip_bytes:,} bytes manually.")
-                        except Exception as skip_e:
-                            logger.error(f"[{client_id}] Error calculating manual skip: {skip_e}")
+                    if upstream_response.status_code == 200 and initial_start_byte > 0:
+                        skip_bytes = initial_start_byte
+                        logger.warning(f"[{client_id}] Provider ignored Range header (Status 200). Skipping {skip_bytes:,} bytes manually.")
 
                     # Get the stop signal key for this client
                     stop_key = get_vod_client_stop_key(client_id)
@@ -1598,50 +1663,54 @@ class MultiWorkerVODConnectionManager:
                         cleanup_thread.daemon = True
                         cleanup_thread.start()
 
-                except GeneratorExit:
-                    logger.info(f"[{client_id}] Worker {self.worker_id} - Client disconnected from Redis-backed stream")
-                    if not stream_decremented:
-                        stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
-                    else:
-                        has_remaining = redis_connection.has_active_streams()
+                except (GeneratorExit, Exception) as e:
+                    if is_client_disconnect_error(e):
+                        logger.info(f"[{client_id}] Worker {self.worker_id} - Client disconnected from Redis-backed stream ({e})")
+                        if not stream_decremented:
+                            stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                        else:
+                            has_remaining = redis_connection.has_active_streams()
 
-                    # Schedule smart cleanup if this stream's DECR left none remaining
-                    if stream_decremented and not has_remaining and not profile_decremented:
-                        # Decrement profile counter immediately; don't defer to daemon thread
-                        state = redis_connection._get_connection_state()
-                        profile_id = state.m3u_profile_id if state else m3u_profile.id
-                        if profile_id:
-                            self._decrement_profile_connections(profile_id, effective_session_id)
-                            profile_decremented = True
-                            logger.info(f"[{client_id}] Profile session {effective_session_id} removed on client disconnect")
+                        # Schedule smart cleanup if this stream's DECR left none remaining
+                        if stream_decremented and not has_remaining and not profile_decremented:
+                            # Decrement profile counter immediately; don't defer to daemon thread
+                            state = redis_connection._get_connection_state()
+                            profile_id = state.m3u_profile_id if state else m3u_profile.id
+                            if profile_id:
+                                self._decrement_profile_connections(profile_id, effective_session_id)
+                                profile_decremented = True
+                                logger.info(f"[{client_id}] Profile session {effective_session_id} removed on client disconnect")
 
-                        def delayed_cleanup():
-                            time.sleep(3)  # Wait 3 seconds to allow rapid-seeking clients to reconnect
-                            # Re-check active_streams: a seeking/reconnecting client may
-                            # have incremented it within the settle window.
-                            if not redis_connection.has_active_streams():
-                                self._send_vod_event(
-                                    'vod_stopped', client_id, content_name,
-                                    content_uuid, client_ip,
-                                    str(user.id) if user else '0',
-                                    user.username if user else None
-                                )
-                            logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after client disconnect")
-                            redis_connection.cleanup(current_worker_id=self.worker_id)
+                            def delayed_cleanup():
+                                time.sleep(3)  # Wait 3 seconds to allow rapid-seeking clients to reconnect
+                                # Re-check active_streams: a seeking/reconnecting client may
+                                # have incremented it within the settle window.
+                                if not redis_connection.has_active_streams():
+                                    self._send_vod_event(
+                                        'vod_stopped', client_id, content_name,
+                                        content_uuid, client_ip,
+                                        str(user.id) if user else '0',
+                                        user.username if user else None
+                                    )
+                                logger.info(f"[{client_id}] Worker {self.worker_id} - Checking for smart cleanup after client disconnect")
+                                redis_connection.cleanup(current_worker_id=self.worker_id)
 
-                        cleanup_thread = threading.Thread(target=delayed_cleanup)
-                        cleanup_thread.daemon = True
-                        cleanup_thread.start()
+                            cleanup_thread = threading.Thread(target=delayed_cleanup)
+                            cleanup_thread.daemon = True
+                            cleanup_thread.start()
+                        return
 
-                except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError) as e:
-                    # IncompleteRead wrapped by requests — upstream dropped the connection
-                    # mid-transfer. Attempt to resume using a Range header with exponential backoff.
+                    # Upstream connection dropped mid-transfer.
+                    # Attempt to resume using a Range header with exponential backoff.
                     resume_attempted = False
-                    for resume_attempt in range(1, VOD_MAX_RESUME_ATTEMPTS + 1):
-                        if bytes_sent == 0:
-                            # Nothing sent yet — no point resuming
-                            break
+                    current_offset = initial_start_byte + bytes_sent
 
+                    # If client requested an end_byte and we already sent all requested bytes, no need to resume
+                    if initial_end_byte is not None and current_offset > initial_end_byte:
+                        logger.info(f"[{client_id}] All requested range bytes sent ({bytes_sent:,} bytes); no resume needed")
+                        return
+
+                    for resume_attempt in range(1, VOD_MAX_RESUME_ATTEMPTS + 1):
                         # Apply exponential backoff delay (skip delay on attempt 1)
                         if resume_attempt > 1:
                             backoff_idx = resume_attempt - 1
@@ -1685,10 +1754,15 @@ class MultiWorkerVODConnectionManager:
                             )
                             break
 
-                        resume_range = f"bytes={bytes_sent}-"
+                        current_offset = initial_start_byte + bytes_sent
+                        if initial_end_byte is not None:
+                            resume_range = f"bytes={current_offset}-{initial_end_byte}"
+                        else:
+                            resume_range = f"bytes={current_offset}-"
+
                         logger.warning(
                             f"[{client_id}] Worker {self.worker_id} - Upstream connection "
-                            f"dropped at {bytes_sent:,} bytes (attempt {resume_attempt}/{VOD_MAX_RESUME_ATTEMPTS}). "
+                            f"dropped at {bytes_sent:,} bytes sent (offset: {current_offset:,}, attempt {resume_attempt}/{VOD_MAX_RESUME_ATTEMPTS}). "
                             f"Trying resume with {resume_range}"
                         )
                         try:
@@ -1696,10 +1770,35 @@ class MultiWorkerVODConnectionManager:
                             if resumed_response is None:
                                 logger.warning(f"[{client_id}] Resume attempt {resume_attempt} — range not satisfiable, stopping")
                                 break
+
+                            # Handle manual skipping if provider returned 200 instead of 206
+                            skip_bytes_resume = 0
+                            total_skipped_resume = 0
+                            if resumed_response.status_code == 200 and current_offset > 0:
+                                skip_bytes_resume = current_offset
+                                logger.warning(
+                                    f"[{client_id}] Provider ignored Range header on resume (Status 200). "
+                                    f"Skipping {skip_bytes_resume:,} bytes manually."
+                                )
+
+                            resume_chunk_size = VOD_SKIP_CHUNK_SIZE if skip_bytes_resume > 0 else VOD_CHUNK_SIZE
+
                             # Stream resumed — yield remaining chunks
-                            for chunk in resumed_response.iter_content(chunk_size=VOD_CHUNK_SIZE):
+                            for chunk in resumed_response.iter_content(chunk_size=resume_chunk_size):
 
                                 if chunk:
+                                    # Handle manual skipping on resume if needed
+                                    if skip_bytes_resume > 0 and total_skipped_resume < skip_bytes_resume:
+                                        remaining_to_skip = skip_bytes_resume - total_skipped_resume
+                                        if len(chunk) <= remaining_to_skip:
+                                            total_skipped_resume += len(chunk)
+                                            continue
+                                        else:
+                                            chunk = chunk[remaining_to_skip:]
+                                            total_skipped_resume = skip_bytes_resume
+                                            logger.info(f"[{client_id}] Manual skip on resume completed. Starting delivery.")
+                                            resume_chunk_size = VOD_CHUNK_SIZE
+
                                     yield chunk
                                     bytes_sent += len(chunk)
                                     chunk_count += 1
@@ -1719,57 +1818,62 @@ class MultiWorkerVODConnectionManager:
                                                     redis_connection._save_connection_state(state)
                                             finally:
                                                 redis_connection._release_lock()
+
+                            if stop_signal_detected:
+                                logger.info(f"[{client_id}] Worker {self.worker_id} - Stream stopped by signal during resume: {bytes_sent} bytes sent")
+                                break
+
                             # Completed without another drop
                             logger.info(f"[{client_id}] Worker {self.worker_id} - Resume completed after {resume_attempt} attempt(s): {bytes_sent:,} total bytes sent")
                             resume_attempted = True
                             break
-                        except (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError) as retry_e:
-                            logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
-                        except GeneratorExit:
-                            # Client disconnected while we were mid-resume.
-                            logger.info(
-                                f"[{client_id}] Worker {self.worker_id} - Client disconnected "
-                                f"during resume attempt {resume_attempt}"
-                            )
-                            if not stream_decremented:
-                                stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
-                            else:
-                                has_remaining = redis_connection.has_active_streams()
-
-                            if not has_remaining and not profile_decremented:
-                                state = redis_connection._get_connection_state()
-                                profile_id = state.m3u_profile_id if state else m3u_profile.id
-                                if profile_id:
-                                    self._decrement_profile_connections(profile_id, effective_session_id)
-                                    profile_decremented = True
-                                    logger.info(
-                                        f"[{client_id}] Profile session {effective_session_id} "
-                                        f"removed on client disconnect during resume"
-                                    )
-
-                                def delayed_cleanup():
-                                    time.sleep(3)
-                                    if not redis_connection.has_active_streams():
-                                        self._send_vod_event(
-                                            'vod_stopped', client_id, content_name,
-                                            content_uuid, client_ip,
-                                            str(user.id) if user else '0',
-                                            user.username if user else None
-                                        )
-                                    logger.info(
-                                        f"[{client_id}] Worker {self.worker_id} - "
-                                        f"Smart cleanup after disconnect-during-resume"
-                                    )
-                                    redis_connection.cleanup(current_worker_id=self.worker_id)
-
-                                cleanup_thread = threading.Thread(target=delayed_cleanup)
-                                cleanup_thread.daemon = True
-                                cleanup_thread.start()
-
-                            raise  # CRITICAL: re-raise GeneratorExit to terminate the generator properly
                         except Exception as retry_e:
-                            logger.error(f"[{client_id}] Resume attempt {resume_attempt} failed: {retry_e}")
-                            break
+                            if is_client_disconnect_error(retry_e):
+                                logger.info(
+                                    f"[{client_id}] Worker {self.worker_id} - Client disconnected "
+                                    f"during resume attempt {resume_attempt} ({retry_e})"
+                                )
+                                if not stream_decremented:
+                                    stream_decremented, has_remaining = redis_connection.decrement_active_streams_and_check()
+                                else:
+                                    has_remaining = redis_connection.has_active_streams()
+
+                                if not has_remaining and not profile_decremented:
+                                    state = redis_connection._get_connection_state()
+                                    profile_id = state.m3u_profile_id if state else m3u_profile.id
+                                    if profile_id:
+                                        self._decrement_profile_connections(profile_id, effective_session_id)
+                                        profile_decremented = True
+                                        logger.info(
+                                            f"[{client_id}] Profile session {effective_session_id} "
+                                            f"removed on client disconnect during resume"
+                                        )
+
+                                    def delayed_cleanup():
+                                        time.sleep(3)
+                                        if not redis_connection.has_active_streams():
+                                            self._send_vod_event(
+                                                'vod_stopped', client_id, content_name,
+                                                content_uuid, client_ip,
+                                                str(user.id) if user else '0',
+                                                user.username if user else None
+                                            )
+                                        logger.info(
+                                            f"[{client_id}] Worker {self.worker_id} - "
+                                            f"Smart cleanup after disconnect-during-resume"
+                                        )
+                                        redis_connection.cleanup(current_worker_id=self.worker_id)
+
+                                    cleanup_thread = threading.Thread(target=delayed_cleanup)
+                                    cleanup_thread.daemon = True
+                                    cleanup_thread.start()
+                                return
+
+                            if isinstance(retry_e, (requests.exceptions.RequestException, urllib3.exceptions.HTTPError, OSError)):
+                                logger.warning(f"[{client_id}] Resume attempt {resume_attempt} dropped again: {retry_e}")
+                            else:
+                                logger.error(f"[{client_id}] Resume attempt {resume_attempt} failed: {retry_e}")
+                                break
                     else:
                         logger.warning(
                             f"[{client_id}] Worker {self.worker_id} - Upstream connection dropped mid-stream "
@@ -1791,7 +1895,24 @@ class MultiWorkerVODConnectionManager:
                             self._decrement_profile_connections(profile_id, effective_session_id)
                             profile_decremented = True
                             logger.info(f"[{client_id}] Profile session {effective_session_id} removed on upstream drop")
-                        redis_connection.cleanup(current_worker_id=self.worker_id)
+                        if resume_attempted:
+                            # Resume succeeded and completed all data - use delayed cleanup
+                            def delayed_cleanup():
+                                time.sleep(3)
+                                if not redis_connection.has_active_streams():
+                                    self._send_vod_event(
+                                        'vod_stopped', client_id, content_name,
+                                        content_uuid, client_ip,
+                                        str(user.id) if user else '0',
+                                        user.username if user else None
+                                    )
+                                redis_connection.cleanup(current_worker_id=self.worker_id)
+
+                            cleanup_thread = threading.Thread(target=delayed_cleanup)
+                            cleanup_thread.daemon = True
+                            cleanup_thread.start()
+                        else:
+                            redis_connection.cleanup(current_worker_id=self.worker_id)
                     return
 
                 except Exception as e:

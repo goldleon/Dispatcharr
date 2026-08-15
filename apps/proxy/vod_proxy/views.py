@@ -700,7 +700,7 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
                             if int(start_byte) > 0:
                                 logger.info(f"[VOD-SEEK] *** ACTUAL SEEK DETECTED *** Position: {start_pos_mb:.1f} MB")
                         else:
-                            logger.info(f"[VOD-SEEK] Open-en`ded range request (from start)")
+                            logger.info(f"[VOD-SEEK] Open-ended range request (from start)")
                         if end_byte:
                             end_pos_mb = int(end_byte) / (1024 * 1024)
                             logger.info(f"[VOD-SEEK] End position: {end_byte} bytes (~{end_pos_mb:.1f} MB)")
