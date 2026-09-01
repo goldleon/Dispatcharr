@@ -289,9 +289,17 @@ class UserViewSet(viewsets.ModelViewSet):
             for key in disallowed:
                 data.pop(key, None)
 
-            # set their own XC credentials, network rules, or catchup access
-            # via this endpoint.
-            ADMIN_ONLY_PROPS = {"xc_password", "allowed_networks", "catchup_enabled"}
+            # Strip admin-managed keys from custom_properties so users cannot
+            # set their own XC credentials, network rules, or catchup/VOD/DVR
+            # access via this endpoint.
+            ADMIN_ONLY_PROPS = {
+                "xc_password",
+                "allowed_networks",
+                "catchup_enabled",
+                "vod_movies_enabled",
+                "vod_series_enabled",
+                "dvr_access",
+            }
             cp = data.get("custom_properties")
             if isinstance(cp, dict):
                 for key in ADMIN_ONLY_PROPS:

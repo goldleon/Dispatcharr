@@ -15,6 +15,10 @@ services:
       - REDIS_HOST=localhost
       - CELERY_BROKER_URL=redis://localhost:6379/0
       - DISPATCHARR_LOG_LEVEL=info
+      # Redis idle-client timeout in seconds, and per-process redis-py /
+      # django-redis pool cap (Optional, defaults: 300 / 50)
+      #- REDIS_IDLE_TIMEOUT=300
+      #- REDIS_MAX_CONNECTIONS=50
       # First-time web setup from a public IP (optional). When unset, only
       # local/private networks may POST to initialize-superuser.
       #- DISPATCHARR_SETUP_ALLOWED_IP=203.0.113.50
@@ -37,6 +41,9 @@ services:
       # Database Connection Tuning (Optional)
       #- POSTGRES_MAX_CONNECTIONS=200 # Max Postgres connections (default: 200)
       #- DATABASE_CONN_MAX_AGE=60     # Django connection reuse time in seconds (default: 60)
+
+      # Soft open-file limit for uwsgi/daphne/celery (Optional, default: 65536)
+      #- DISPATCHARR_NOFILE=65536
     #
     # Uncomment to enable high priority for streaming (required if UWSGI_NICE_LEVEL < 0)
     #cap_add:

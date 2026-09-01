@@ -40,6 +40,7 @@
     "react-virtualized-auto-sizer": "^1.0.26",
     "react-window": "^1.8.11",
     "recharts": "^2.15.4",
+    "source-map-js": "^1.2.1",
     "video.js": "^8.23.7",
     "yup": "^1.7.1",
     "zustand": "^5.0.12"
