@@ -1160,9 +1160,9 @@ def _channel_parse_progress(processed_channels, channel_estimate, had_db_baselin
             channel_estimate,
         )
 
-    if processed_channels > channel_estimate:
+    if channel_estimate is not None and processed_channels > channel_estimate:
         channel_estimate = processed_channels
-    if channel_estimate <= 0:
+    if not channel_estimate or channel_estimate <= 0:
         return _CHANNEL_PARSE_PROGRESS_START, channel_estimate
 
     span = _CHANNEL_PARSE_PROGRESS_CAP - _CHANNEL_PARSE_PROGRESS_START

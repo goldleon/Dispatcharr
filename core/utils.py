@@ -115,7 +115,7 @@ def truncate_with_warning(value, max_length, *, label):
     (e.g. ``Logo._meta.get_field("name").max_length``) and a short label
     for log context (e.g. ``"Logo name"``).
     """
-    if value is None:
+    if value is None or max_length is None:
         return value
     if not isinstance(value, str):
         value = str(value)

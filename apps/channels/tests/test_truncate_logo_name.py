@@ -57,6 +57,13 @@ class TruncateWithWarningHelperTests(TestCase):
             "abc",
         )
 
+    def test_none_max_length_passthrough(self):
+        """When max_length is None (e.g. TextField), value is returned as-is without error."""
+        self.assertEqual(
+            truncate_with_warning("Any long name without limit", max_length=None, label="EPG display name"),
+            "Any long name without limit",
+        )
+
 
 class LogoNameTruncationModelTests(TestCase):
     def test_create_truncates_long_name(self):
