@@ -192,18 +192,8 @@ def initialize_superuser(request):
 class AuthViewSet(viewsets.ViewSet):
     """Handles user login and logout"""
 
-    def get_authenticators(self):
-        if self.action == 'logout':
-            return [LenientJWTAuthentication(), ApiKeyAuthentication()]
-        return super().get_authenticators()
-
-    def get_permissions(self):
-        """
-        Neither login nor logout strictly require valid authentication.
-        Logout accepts requests even if the token has already expired so that
-        clients can cleanly finalize logout without 401 warnings.
-        """
-        return []
+    authentication_classes = [LenientJWTAuthentication, ApiKeyAuthentication]
+    permission_classes = []
 
     @extend_schema(
         description="Alias for POST /api/accounts/token/ — returns JWT access and refresh tokens.",
