@@ -24,6 +24,9 @@ const isTokenExpired = (expirationTime) => {
   return now >= expirationTime;
 };
 
+let refreshPromise = null;
+let logoutPromise = null;
+
 const useAuthStore = create((set, get) => ({
   isAuthenticated: false,
   isInitialized: false,
@@ -200,52 +203,74 @@ const useAuthStore = create((set, get) => ({
 
   // Action to refresh the token
   getRefreshToken: async () => {
+    if (refreshPromise) {
+      return await refreshPromise;
+    }
+
     const refreshToken = localStorage.getItem('refreshToken');
     if (!refreshToken) return false;
 
-    try {
-      const data = await API.refreshToken(refreshToken);
-      if (data?.access) {
-        set({
-          accessToken: data.access,
-          tokenExpiration: decodeToken(data.access),
-        });
-        localStorage.setItem('accessToken', data.access);
-        localStorage.setItem('tokenExpiration', decodeToken(data.access));
+    refreshPromise = (async () => {
+      try {
+        const data = await API.refreshToken(refreshToken);
+        if (data?.access) {
+          set({
+            accessToken: data.access,
+            tokenExpiration: decodeToken(data.access),
+          });
+          localStorage.setItem('accessToken', data.access);
+          localStorage.setItem('tokenExpiration', decodeToken(data.access));
 
-        return data.access;
+          return data.access;
+        }
+        return false;
+      } catch (error) {
+        console.error('Token refresh failed:', error);
+        await get().logout();
+        return false;
+      } finally {
+        refreshPromise = null;
       }
-      return false;
-    } catch (error) {
-      console.error('Token refresh failed:', error);
-      await get().logout();
-      return false;
-    }
+    })();
+
+    return await refreshPromise;
   },
 
   // Action to logout
   logout: async () => {
-    // Call backend logout endpoint to log the event
-    try {
-      await API.logout();
-    } catch (error) {
-      // Continue with logout even if API call fails
-      console.error('Logout API call failed:', error);
+    if (logoutPromise) {
+      return await logoutPromise;
     }
 
-    set({
-      accessToken: null,
-      refreshToken: null,
-      tokenExpiration: null,
-      isAuthenticated: false,
-      isInitialized: false,
-      isInitializing: false,
-      isCheckingAuth: false,
-      user: null,
-    });
-    localStorage.removeItem('accessToken');
-    localStorage.removeItem('refreshToken');
-    localStorage.removeItem('tokenExpiration');
+    logoutPromise = (async () => {
+      // Call backend logout endpoint to log the event
+      try {
+        await API.logout();
+      } catch (error) {
+        // Continue with logout even if API call fails
+        console.error('Logout API call failed:', error);
+      }
+
+      set({
+        accessToken: null,
+        refreshToken: null,
+        tokenExpiration: null,
+        isAuthenticated: false,
+        isInitialized: false,
+        isInitializing: false,
+        isCheckingAuth: false,
+        user: null,
+      });
+      localStorage.removeItem('accessToken');
+      localStorage.removeItem('refreshToken');
+      localStorage.removeItem('tokenExpiration');
+    })();
+
+    try {
+      await logoutPromise;
+    } finally {
+      logoutPromise = null;
+    }
   },
 
   initializeAuth: async () => {

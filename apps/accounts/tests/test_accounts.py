@@ -186,3 +186,24 @@ class InitializeSuperuserTests(TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertFalse(User.objects.filter(username="badenv").exists())
+
+
+class AuthLogoutTests(TestCase):
+    """Tests for the auth logout endpoint"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.url = "/api/accounts/auth/logout/"
+
+    def test_logout_without_token_succeeds(self):
+        """Logout without any token returns 200 instead of 401"""
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"message": "Logout successful"})
+
+    def test_logout_with_invalid_token_succeeds(self):
+        """Logout with expired or invalid bearer token returns 200 without warning/401"""
+        self.client.credentials(HTTP_AUTHORIZATION="Bearer invalid.or.expired.jwt.token")
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"message": "Logout successful"})

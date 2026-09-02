@@ -200,8 +200,11 @@ export default class API {
   }
 
   static async logout() {
+    const token = localStorage.getItem('accessToken');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
     return await request(`${host}/api/accounts/auth/logout/`, {
-      auth: true, // Send JWT token so backend can identify the user
+      auth: false, // Don't call getAuthToken() which might trigger an auth refresh loop
+      headers,
       method: 'POST',
     });
   }

@@ -21,6 +21,7 @@ from dispatcharr.utils import (
 
 from .models import User
 from .serializers import UserSerializer, GroupSerializer, PermissionSerializer
+from .authentication import LenientJWTAuthentication, ApiKeyAuthentication
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 logger = logging.getLogger(__name__)
@@ -191,12 +192,17 @@ def initialize_superuser(request):
 class AuthViewSet(viewsets.ViewSet):
     """Handles user login and logout"""
 
+    def get_authenticators(self):
+        if self.action == 'logout':
+            return [LenientJWTAuthentication(), ApiKeyAuthentication()]
+        return super().get_authenticators()
+
     def get_permissions(self):
         """
-        Login doesn't require auth, but logout does
+        Neither login nor logout strictly require valid authentication.
+        Logout accepts requests even if the token has already expired so that
+        clients can cleanly finalize logout without 401 warnings.
         """
-        if self.action == 'logout':
-            return [Authenticated()]
         return []
 
     @extend_schema(

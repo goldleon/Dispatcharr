@@ -111,3 +111,19 @@ class QueryParamJWTAuthentication(JWTAuthentication):
             return self.get_user(validated_token), validated_token
         except (InvalidToken, TokenError):
             return None
+
+
+class LenientJWTAuthentication(JWTAuthentication):
+    """
+    Authenticates JWT tokens if valid, but returns None if the token is invalid
+    or expired instead of raising an AuthenticationFailed / InvalidToken error.
+    Used for endpoints like logout where expired sessions should still be allowed
+    to terminate cleanly.
+    """
+
+    def authenticate(self, request):
+        try:
+            return super().authenticate(request)
+        except (InvalidToken, TokenError, exceptions.AuthenticationFailed):
+            return None
+
