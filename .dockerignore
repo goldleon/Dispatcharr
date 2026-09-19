@@ -31,27 +31,25 @@
 LICENSE
 data/
 docker/data/
-
-# Graphify
-graphify-out/
-
-# IDEs
-.idea/
-
-# Docs and project info
-docs/
+tests/
+**/tests/
+**/__tests__/
+docker/tests/
+frontend/src/test/
+frontend/eslint.config.js
+frontend/prettier.config.js
 *.md
-LICENSE
-
-# Local logo cache
-logo_cache/
-
-# Scripts / install files not needed in final container
-debian_install.sh
-redis_migration.py
-
-# Github Actions
+!/README.md
+docs/
 .github/
-
-# Package config
+.idea/
+.gitattributes
 .python-version
+debian_install.sh
+fixtures.json
+scripts/*
+!scripts/wait_for_redis.py
+docker/build-dev.sh
+graphify-out/
+logo_cache/
+redis_migration.py

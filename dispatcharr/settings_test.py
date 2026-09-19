@@ -63,3 +63,6 @@ else:
             },
         }
     }
+
+# Tests must never reconfigure or signal a live collector on the host.
+LOG_FILE_DIR = None
