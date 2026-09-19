@@ -62,3 +62,42 @@ class ChannelDeleteDoesNotAutoStopTests(TestCase):
 
         mock_stop.assert_not_called()
         self.assertFalse(Channel.objects.filter(pk=channel_id).exists())
+
+
+class InitializeChannelNameLookupTests(SimpleTestCase):
+    @patch("apps.proxy.live_proxy.services.channel_service.close_old_connections")
+    @patch("apps.proxy.live_proxy.services.channel_service.ProxyServer.get_instance")
+    @patch("apps.channels.models.Stream.objects.filter")
+    @patch("apps.channels.models.Channel.objects.filter")
+    def test_initialize_channel_loads_channel_and_stream_names(
+        self, mock_channel_filter, mock_stream_filter, mock_get_instance, _mock_close
+    ):
+        mock_server = MagicMock()
+        mock_server.redis_client = None
+        mock_server.initialize_channel.return_value = True
+        mock_get_instance.return_value = mock_server
+
+        mock_channel_filter.return_value.values_list.return_value.first.return_value = "Test Channel"
+        mock_stream_filter.return_value.values_list.return_value.first.return_value = "Test Stream"
+
+        from apps.proxy.live_proxy.services.channel_service import ChannelService
+
+        success = ChannelService.initialize_channel(
+            channel_id="7789c16c-0aab-4821-b2e0-be4a152cd126",
+            stream_url="http://example.com/test.ts",
+            user_agent="test-agent",
+            stream_id=135344,
+            channel_name=None,
+            stream_name=None,
+        )
+
+        self.assertTrue(success)
+        mock_server.initialize_channel.assert_called_once_with(
+            "http://example.com/test.ts",
+            "7789c16c-0aab-4821-b2e0-be4a152cd126",
+            "test-agent",
+            False,
+            135344,
+            channel_name="Test Channel",
+            stream_name="Test Stream",
+        )

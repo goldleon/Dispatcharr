@@ -1,4 +1,4 @@
-import { lazy } from 'react';
+import { lazyWithRetry as lazy } from '../utils/lazyWithRetry';
 import {
   ArrowLeftRight,
   DatabaseBackup,

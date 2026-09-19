@@ -284,7 +284,7 @@ class _PrependStream:
         if self._prefix_pos >= prefix_len:
             return self._file.read(size)
         remaining = prefix_len - self._prefix_pos
-        if size < 0:
+        if size is None or size < 0:
             chunk = self._prefix[self._prefix_pos:] + self._file.read()
             self._prefix_pos = prefix_len
             return chunk
@@ -3247,7 +3247,8 @@ def find_current_program_for_tvg_id(epg_or_id):
 
     # No index yet: dispatch a background build and let the frontend retry.
     # A sync scan can block a worker for ~10s on SMB-hosted EPGs.
-    build_programme_index_task.delay(source.id)
+    if not is_task_lock_held(_EPG_SOURCE_FILE_LOCK, source.id):
+        build_programme_index_task.delay(source.id)
     return 'timeout'
 
 

@@ -150,8 +150,6 @@ class ChannelService:
             if ChannelService._channel_proxy_is_active(
                 proxy_server.redis_client, channel_id
             ):
-                from apps.channels.models import Channel
-
                 channel = Channel.objects.filter(uuid=channel_id).first()
                 if channel and not proxy_server.redis_client.get(
                     f"channel_stream:{channel.id}"
@@ -354,7 +352,6 @@ class ChannelService:
                     update_data["channel_db_id"] = str(channel_db_id)
                 else:
                     try:
-                        from apps.channels.models import Channel
                         channel_obj = Channel.objects.filter(uuid=channel_id).first()
                         if channel_obj:
                             update_data["channel_db_id"] = str(channel_obj.id)
@@ -364,14 +361,12 @@ class ChannelService:
                 # Store channel name and stream name so stats workers don't need DB calls
                 try:
                     if not channel_name:
-                        from apps.channels.models import Channel
                         channel_name = Channel.objects.filter(uuid=channel_id).values_list('name', flat=True).first()
                     if channel_name:
                         update_data[ChannelMetadataField.CHANNEL_NAME] = channel_name
                     else:
                         # No channel name means stream preview mode, use stream name as display fallback
                         if stream_id and not stream_name:
-                            from apps.channels.models import Stream
                             stream_name = Stream.objects.filter(id=stream_id).values_list('name', flat=True).first()
                         if stream_name:
                             update_data[ChannelMetadataField.STREAM_NAME] = stream_name
@@ -887,7 +882,6 @@ class ChannelService:
     def _update_stream_stats_in_db(stream_id, **stats):
         """Update stream stats in database"""
         try:
-            from apps.channels.models import Stream
             from django.utils import timezone
 
             stream = Stream.objects.get(id=stream_id)
@@ -941,7 +935,6 @@ class ChannelService:
                 metadata[ChannelMetadataField.STREAM_ID] = str(stream_id)
                 if not stream_name:
                     try:
-                        from apps.channels.models import Stream
                         stream_name = Stream.objects.filter(id=stream_id).values_list('name', flat=True).first()
                     except Exception as e:
                         logger.warning(f"Failed to update stream name in Redis for stream {stream_id}: {e}")

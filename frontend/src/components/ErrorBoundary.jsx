@@ -1,5 +1,6 @@
 import React from 'react';
 import { X } from 'lucide-react';
+import { isChunkLoadError, handleChunkLoadError } from '../utils/chunkLoad';
 
 const redactDiagnosticText = (value) => {
   if (!value) return '';
@@ -26,6 +27,9 @@ class ErrorBoundary extends React.Component {
   }
 
   componentDidCatch(error, errorInfo) {
+    if (handleChunkLoadError(error)) {
+      return;
+    }
     this.setState({ errorInfo });
     console.error('ErrorBoundary caught:', {
       boundary: this.props.name || 'application',
@@ -156,14 +160,38 @@ class ErrorBoundary extends React.Component {
           >
             <X size={18} />
           </button>
-          <Heading style={{ marginTop: 0 }}>Something went wrong</Heading>
-          <p>{this.state.error?.message || 'An unexpected error occurred.'}</p>
+          <Heading style={{ marginTop: 0 }}>
+            {isChunkLoadError(this.state.error) ? 'Update Available' : 'Something went wrong'}
+          </Heading>
+          <p>
+            {isChunkLoadError(this.state.error)
+              ? 'A new version of Dispatcharr has been deployed. Please reload the page to load the latest updates.'
+              : this.state.error?.message || 'An unexpected error occurred.'}
+          </p>
           <p style={{ color: '#a1a1aa', fontSize: 14 }}>
-            Copy the diagnostic report when asking for support. It contains
-            the error and React component stacks, route, build mode, and
-            browser.
+            {isChunkLoadError(this.state.error)
+              ? 'Reloading will fetch the latest assets for your current route.'
+              : 'Copy the diagnostic report when asking for support. It contains the error and React component stacks, route, build mode, and browser.'}
           </p>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {isChunkLoadError(this.state.error) && (
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  minWidth: 120,
+                  backgroundColor: '#2563eb',
+                  color: '#ffffff',
+                  border: 'none',
+                  borderRadius: 4,
+                  padding: '8px 16px',
+                  cursor: 'pointer',
+                  fontWeight: 500,
+                }}
+              >
+                Reload Page
+              </button>
+            )}
             <button
               type="button"
               onClick={this.copyDiagnosticReport}

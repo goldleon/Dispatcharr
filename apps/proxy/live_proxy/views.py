@@ -66,30 +66,43 @@ def _channel_setup_needed(proxy_server, channel_id):
         metadata = proxy_server.redis_client.hgetall(RedisKeys.channel_metadata(channel_id))
         if metadata:
             state = metadata.get(ChannelMetadataField.STATE)
-            if state in (
-                ChannelState.ACTIVE,
-                ChannelState.WAITING_FOR_CLIENTS,
-                ChannelState.BUFFERING,
-                ChannelState.INITIALIZING,
-                ChannelState.CONNECTING,
+            if state == ChannelState.STOPPING:
+                return False, state, False
+            if state in (ChannelState.ERROR, ChannelState.STOPPED):
+                return True, state, False
+
+            # Check if this channel has a live owner
+            # 1. Local worker ownership/activity
+            if (
+                channel_id in proxy_server.stream_managers
+                or channel_id in proxy_server.stream_buffers
             ):
                 wait_for_init = state in (
                     ChannelState.INITIALIZING,
                     ChannelState.CONNECTING,
                 )
                 return False, state, wait_for_init
-            if state == ChannelState.STOPPING:
-                return False, state, False
-            if state in (ChannelState.ERROR, ChannelState.STOPPED):
-                return True, state, False
 
-            # Unknown/empty state: trust a live owner worker, otherwise re-setup
-            owner = metadata.get(ChannelMetadataField.OWNER)
-            if owner:
-                owner_heartbeat_key = f"live:worker:{owner}:heartbeat"
+            # 2. Remote worker ownership
+            current_owner = proxy_server.get_channel_owner(channel_id)
+            if current_owner and current_owner != proxy_server.worker_id:
+                owner_heartbeat_key = RedisKeys.worker_heartbeat(current_owner)
                 if proxy_server.redis_client.exists(owner_heartbeat_key):
-                    return False, state, False
-                return True, state, False
+                    wait_for_init = state in (
+                        ChannelState.INITIALIZING,
+                        ChannelState.CONNECTING,
+                    )
+                    return False, state, wait_for_init
+
+            # No live owner found for this metadata - clean up zombie and re-setup
+            owner = metadata.get(ChannelMetadataField.OWNER)
+            logger.warning(
+                f"Detected zombie/unowned channel {channel_id} (state: {state}, owner: {owner}, current_owner: {current_owner}) - cleaning up"
+            )
+            clean_func = getattr(proxy_server, "_clean_zombie_channel", None)
+            if callable(clean_func):
+                clean_func(channel_id, metadata)
+            return True, None, False
 
     if proxy_server.check_if_channel_exists(channel_id):
         return False, state, False
@@ -632,9 +645,7 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
                 logger.error(
                     f"[{client_id}] Failed to initialize channel {channel_id} locally"
                 )
-                return JsonResponse(
-                    {"error": "Failed to initialize channel locally"}, status=500
-                )
+                return _channel_stopping_response()
 
             logger.info(
                 f"[{client_id}] Successfully initialized channel {channel_id} locally"

@@ -1559,8 +1559,6 @@ class StreamManager:
 
         logger.info(f"Switching stream URL from {self.url} to {new_url} for channel {self.channel_id}")
 
-        # Import both models for proper resource management
-        from apps.channels.models import Stream, Channel
         from django.db import connection
 
         # Update stream profile if we're switching streams

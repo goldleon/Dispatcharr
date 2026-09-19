@@ -513,8 +513,9 @@ class FindCurrentProgramTests(TestCase):
         finally:
             os.unlink(tmp_path)
 
+    @patch("apps.epg.tasks.is_task_lock_held", return_value=False)
     @patch("apps.epg.tasks.build_programme_index_task")
-    def test_no_index_dispatches_build_and_returns_timeout(self, mock_build_task):
+    def test_no_index_dispatches_build_and_returns_timeout(self, mock_build_task, _mock_lock):
         # Source with no index and file on disk
         src = EPGSource.objects.create(
             name="No Index",
@@ -531,6 +532,25 @@ class FindCurrentProgramTests(TestCase):
 
         self.assertEqual(result, "timeout")
         mock_build_task.delay.assert_called_once_with(src.id)
+
+    @patch("apps.epg.tasks.is_task_lock_held", return_value=True)
+    @patch("apps.epg.tasks.build_programme_index_task")
+    def test_no_index_skips_dispatch_when_file_lock_held(self, mock_build_task, _mock_lock):
+        src = EPGSource.objects.create(
+            name="No Index Locked",
+            source_type="xmltv",
+            file_path=FIXTURE_XML,
+        )
+        epg = EPGData.objects.create(
+            tvg_id="channel.current",
+            name="Current",
+            epg_source=src,
+        )
+
+        result = find_current_program_for_tvg_id(epg)
+
+        self.assertEqual(result, "timeout")
+        mock_build_task.delay.assert_not_called()
 
 
 class BuildProgrammeIndexTests(TestCase):
