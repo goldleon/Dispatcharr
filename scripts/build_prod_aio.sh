@@ -65,6 +65,7 @@ if [ "$PUSH" = "true" ]; then
         -f "${ROOT_DIR}/docker/Dockerfile" \
         -t "${FULL_IMAGE}:latest" \
         -t "${FULL_IMAGE}:${VERSION}" \
+        -t "${FULL_IMAGE}:v${VERSION}" \
         --push \
         "${ROOT_DIR}"
 else

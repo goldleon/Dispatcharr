@@ -1969,6 +1969,7 @@ class MultiWorkerVODConnectionManager:
             response['X-Content-Type-Options'] = 'nosniff'
             response['Connection'] = 'keep-alive'
             response['X-Worker-ID'] = self.worker_id  # Identify which worker served this
+            response['X-Accel-Buffering'] = 'no'
 
             if connection_headers.get('content_length'):
                 response['Accept-Ranges'] = 'bytes'

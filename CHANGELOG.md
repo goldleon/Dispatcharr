@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [0.31.1] - 2026-10-28
+
+### Fixed
+
+- **Daphne WebSocket event-loop deadlock on `/ws/`.** Removed `gevent.monkey.patch_all()` from `dispatcharr/asgi.py`. Daphne runs an `asyncio`/Twisted event loop where gevent's monkey-patched `select.epoll` broke threadpool event loops, causing permanent deadlocks during WebSocket authentication and IP lookup (`HTTP 499`).
+- **Xtream Codes Live TV & VOD NGINX buffering.** Configured `uwsgi_buffering off;`, `uwsgi_read_timeout 3600s;`, and `uwsgi_send_timeout 3600s;` in container NGINX site configuration for all Xtream Codes routes and `location /`, and added `X-Accel-Buffering: no` on live and VOD `StreamingHttpResponse` instances to eliminate player starvation and broken-pipe disconnects.
+- **Multi-worker Redis `SET NX` channel ownership split-brain.** Fixed `ProxyServer.try_acquire_ownership` in `apps/proxy/live_proxy/server.py` to use a distinct `_REDIS_ERROR` sentinel so normal lock contention in redis-py (where `SET ... NX` returns `None`) is not treated as a Redis outage. Non-owner workers now correctly observe existing ownership without stealing locks or prematurely dropping active stream buffers.
+
+
 ## [0.27.0] - 2026-06-16
 
 ### Added

@@ -31,10 +31,13 @@ from .utils import get_logger
 
 logger = get_logger()
 
+_REDIS_ERROR = object()  # Sentinel for distinguishing Redis errors from valid None returns (e.g. SET NX key collision)
+
 class ProxyServer:
     """Manages TS proxy server instance with worker coordination"""
     _instance = None
     _INITIALIZING = object()  # sentinel for gevent-safe singleton
+    _REDIS_ERROR = _REDIS_ERROR
 
     @classmethod
     def get_instance(cls):
@@ -133,10 +136,10 @@ class ProxyServer:
         else:
             logger.error(f"Failed to connect to Redis after {self.redis_max_retries} attempts")
 
-    def _execute_redis_command(self, command_func, *args, **kwargs):
+    def _execute_redis_command(self, command_func, *args, default=None, **kwargs):
         """Execute Redis command with error handling and reconnection logic"""
         if not self.redis_client:
-            return None
+            return default
 
         try:
             return command_func(*args, **kwargs)
@@ -151,10 +154,10 @@ class ProxyServer:
                     return command_func(*args, **kwargs)
             except Exception as reconnect_error:
                 logger.error(f"Failed to reconnect to Redis: {reconnect_error}")
-            return None
+            return default
         except Exception as e:
             logger.error(f"Redis command error: {e}")
-            return None
+            return default
 
     def _spawn_on_hub(self, fn, *args, **kwargs):
         """Schedule fn on the gevent hub from any thread without blocking the caller."""
@@ -476,30 +479,35 @@ class ProxyServer:
 
             # Use atomic SET NX EX for locking with error handling
             acquired = self._execute_redis_command(
-                lambda: self.redis_client.set(lock_key, self.worker_id, nx=True, ex=ttl)
+                lambda: self.redis_client.set(lock_key, self.worker_id, nx=True, ex=ttl),
+                default=_REDIS_ERROR,
             )
 
-            if acquired is None:  # Redis command failed
-                logger.warning(f"Redis command failed during ownership acquisition - assuming ownership")
+            if acquired is _REDIS_ERROR:
+                logger.warning("Redis command failed during ownership acquisition - assuming ownership")
                 return True
 
-            if acquired:
+            if acquired is True:
                 logger.info(f"Worker {self.worker_id} acquired ownership of channel {channel_id}")
                 return True
 
-            # If not acquired, check if we already own it (might be a retry)
+            # If acquired is None or False (lock already held in Redis), check if we already own it (might be a retry)
             current_owner = self._execute_redis_command(
-                lambda: self.redis_client.get(lock_key)
+                lambda: self.redis_client.get(lock_key),
+                default=_REDIS_ERROR,
             )
-            if current_owner and current_owner == self.worker_id:
-                # Refresh TTL
-                self._execute_redis_command(
-                    lambda: self.redis_client.expire(lock_key, ttl)
-                )
-                logger.info(f"Worker {self.worker_id} refreshed ownership of channel {channel_id}")
-                return True
+            if current_owner and current_owner is not _REDIS_ERROR:
+                if isinstance(current_owner, bytes):
+                    current_owner = current_owner.decode()
+                if current_owner == self.worker_id:
+                    # Refresh TTL
+                    self._execute_redis_command(
+                        lambda: self.redis_client.expire(lock_key, ttl)
+                    )
+                    logger.info(f"Worker {self.worker_id} refreshed ownership of channel {channel_id}")
+                    return True
 
-            # Someone else owns it
+            # Someone else owns it (or Redis command failed)
             return False
 
         except Exception as e:
@@ -578,6 +586,9 @@ class ProxyServer:
                         logger.warning(f"Could not re-acquire ownership for {channel_id}, new owner: {new_owner}")
                         return False
                 return False
+
+            if isinstance(current, bytes):
+                current = current.decode()
 
             if current == self.worker_id:
                 self.redis_client.expire(lock_key, ttl)

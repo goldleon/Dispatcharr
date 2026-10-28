@@ -793,6 +793,7 @@ def stream_ts(request, channel_id, user=None, force_output_format=None):
             streaming_content=generate(), content_type=content_type
         )
         response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
         return response
 
     except Http404:

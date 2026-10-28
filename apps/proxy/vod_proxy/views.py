@@ -9,7 +9,7 @@ import logging
 import requests
 from urllib.parse import urlencode
 from django.db import close_old_connections
-from django.http import JsonResponse, Http404, HttpResponse, HttpResponseRedirect
+from django.http import JsonResponse, Http404, HttpResponse, HttpResponseRedirect, StreamingHttpResponse
 from django.shortcuts import get_object_or_404
 from django.views.decorators.csrf import csrf_exempt
 from apps.vod.models import Movie, Series, Episode, M3UMovieRelation, M3UEpisodeRelation
@@ -919,6 +919,8 @@ def stream_vod(request, content_type, content_id, session_id=None, profile_id=No
         )
 
         logger.info(f"[VOD-SUCCESS] Stream response created successfully, type: {type(response)}")
+        if isinstance(response, StreamingHttpResponse):
+            response["X-Accel-Buffering"] = "no"
         return response
 
     except Exception as e:

@@ -489,8 +489,10 @@ server {
 
     location / {
         include uwsgi_params;
-        uwsgi_read_timeout 600;
-        uwsgi_send_timeout 600;
+        uwsgi_buffering off;
+        uwsgi_read_timeout 3600;
+        uwsgi_send_timeout 3600;
+        client_max_body_size 0;
         uwsgi_pass unix:${UWSGI_SOCKET};
     }
     location /static/ {
