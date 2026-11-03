@@ -1,11 +1,10 @@
 # connect/handlers/webhook.py
 import requests, json, logging
-class WebhookHandler:
-    def __init__(self, integration, subscription, payload):
-        self.integration = integration
-        self.subscription = subscription
-        self.payload = payload
+from .base import IntegrationHandler
 
+logger = logging.getLogger(__name__)
+
+class WebhookHandler(IntegrationHandler):
     def execute(self):
         url = self.integration.config.get("url")
         headers = self.integration.config.get("headers", {})

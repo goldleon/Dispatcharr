@@ -1,4 +1,49 @@
-from functools import lru_cache
+"""Process-local caches for live proxy lookups.
+
+post_save/post_delete signals clear these, but only in the process that
+saved the row; uWSGI stream workers are separate processes. Entries therefore
+also expire after ``_TTL_SECONDS`` so a stream profile, user agent or header
+change reaches every worker within a minute instead of at the next restart.
+"""
+import functools
+import threading
+import time
+
+_TTL_SECONDS = 60.0
+
+
+def lru_cache(maxsize=128):
+    """Bounded memoize with a TTL; exposes ``cache_clear()`` like functools."""
+
+    def decorator(fn):
+        cache = {}
+        lock = threading.Lock()
+
+        @functools.wraps(fn)
+        def wrapper(*args):
+            now = time.monotonic()
+            with lock:
+                hit = cache.get(args)
+                if hit is not None and now - hit[0] < _TTL_SECONDS:
+                    return hit[1]
+            value = fn(*args)
+            with lock:
+                if len(cache) >= maxsize:
+                    # Drop the oldest entry (dicts keep insertion order).
+                    cache.pop(next(iter(cache)), None)
+                cache.pop(args, None)
+                cache[args] = (now, value)
+            return value
+
+        def cache_clear():
+            with lock:
+                cache.clear()
+
+        wrapper.cache_clear = cache_clear
+        return wrapper
+
+    return decorator
+
 
 @lru_cache(maxsize=1000)
 def get_channel_name(channel_uuid):

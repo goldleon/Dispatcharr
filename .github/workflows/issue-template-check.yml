@@ -1,9 +1,13 @@
+name: "Issue: Template Check"
+
 on:
   issues:
     types: [opened, reopened]
 
 jobs:
   check:
+    # Upstream repo-bot needs Dispatcharr's GitHub App; skip on forks.
+    if: github.repository == 'Dispatcharr/Dispatcharr'
     runs-on: ubuntu-latest
     steps:
 

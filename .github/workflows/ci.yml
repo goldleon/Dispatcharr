@@ -126,7 +126,7 @@ jobs:
         with:
           images: |
             ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${{ needs.prepare.outputs.repo_name }}
           labels: |
             org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
             org.opencontainers.image.description=Your ultimate IPTV & stream Management companion.
@@ -238,6 +238,6 @@ jobs:
             --annotation "index:org.opencontainers.image.authors=${{ github.actor }}" \
             --annotation "index:maintainer=${{ github.actor }}" \
             --annotation "index:build_version=Dispatcharr version: ${VERSION}-${TIMESTAMP}" \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG} \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-${TIMESTAMP} \
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${BRANCH_TAG}-arm64
+            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${BRANCH_TAG} \
+            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${VERSION}-${TIMESTAMP} \
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${BRANCH_TAG}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${BRANCH_TAG}-arm64
