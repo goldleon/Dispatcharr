@@ -368,10 +368,11 @@ class M3UEpisodeRelation(models.Model):
     class Meta:
         verbose_name = 'M3U Episode Relation'
         verbose_name_plural = 'M3U Episode Relations'
-        unique_together = [
-            ('m3u_account', 'stream_id'),
-            ('m3u_account', 'episode'),
-        ]
+        # One relation per provider stream. Upstream's language identity
+        # (v0.33.0) can attach several provider series (one per category or
+        # language) of the same account to one episode while it reconciles,
+        # so (m3u_account, episode) is not unique.
+        unique_together = [('m3u_account', 'stream_id')]
 
     def __str__(self):
         return f"{self.m3u_account.name} - {self.episode}"
