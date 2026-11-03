@@ -2908,11 +2908,6 @@ def run_recording(recording_id, channel_id, start_time_str, end_time_str):
                 # 20s heartbeat window need it to keep fetching .ts segments
                 # during the viewer-wait grace period below.  _hls_dir is
                 # cleared only after the directory is actually removed.
-                try:
-                    if os.path.exists(concat_list_path):
-                        os.remove(concat_list_path)
-                except OSError:
-                    pass
 
                 # Pre-cleanup DB update: ensure URLs point to the final file
                 try:
