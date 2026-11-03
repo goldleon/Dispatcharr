@@ -3,8 +3,8 @@ VOD (Video on Demand) proxy views for handling movie and series streaming.
 Supports M3U profiles for authentication and URL transformation.
 """
 
+import secrets
 import time
-import random
 import logging
 import requests
 from urllib.parse import urlencode
@@ -131,6 +131,16 @@ def _session_redirect_cache_control(request):
     if "token" in request.GET:
         return "no-store"
     return f"private, max-age={VOD_SESSION_REDIRECT_CACHE_SECONDS}"
+
+
+def _new_vod_session_id():
+    """Mint an unguessable VOD session id.
+
+    The id travels in the URL and maps (via Redis) to the user that opened the
+    session, so it must not be predictable. The old ``vod_<ms>_<4 digits>``
+    form could be enumerated within the mapping's TTL.
+    """
+    return f"vod_{int(time.time() * 1000)}_{secrets.token_urlsafe(16)}"
 
 
 def _vod_session_path_redirect(request, session_id, profile_id=None, user=None):
@@ -870,7 +880,7 @@ def stream_vod(
                     return HttpResponseRedirect(selected["final_stream_url"])
 
             elif is_vod_proxy_path:
-                new_session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                new_session_id = _new_vod_session_id()
                 logger.info(f"[VOD-SESSION] Creating new session: {new_session_id}")
                 return _vod_session_path_redirect(
                     request, new_session_id, profile_id=profile_id, user=user
@@ -881,7 +891,7 @@ def stream_vod(
                 # parameters across requests and strip Range headers on redirects.
                 # Skipping the redirect saves one round-trip, preserves Range headers,
                 # and lets playback start immediately.
-                session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                session_id = _new_vod_session_id()
                 logger.info(f"[VOD-SESSION] XC path: using session {session_id} inline (no redirect)")
 
         # Resolve user from Redis session mapping when the streaming request
@@ -1042,7 +1052,7 @@ def head_vod(request, content_type, content_id, session_id=None, profile_id=None
                 )
                 session_id = matched_session_id
             else:
-                session_id = f"vod_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+                session_id = _new_vod_session_id()
                 logger.info(f"[VOD-HEAD] Creating new session for HEAD: {session_id}")
 
             if profile_id:
