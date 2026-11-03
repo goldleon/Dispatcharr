@@ -103,13 +103,20 @@ jobs:
           fi
           REPO_OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           REPO_NAME="$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')"
-          echo "image=ghcr.io/${REPO_OWNER}/${REPO_NAME}:${TAG}" >> "$GITHUB_OUTPUT"
+          IMAGE="ghcr.io/${REPO_OWNER}/${REPO_NAME}:${TAG}"
+          # Forks start without a published base image; fall back to upstream's
+          # public one (Python deps are re-synced below when pyproject changes).
+          if ! docker manifest inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "::notice::$IMAGE not published yet, using ghcr.io/dispatcharr/dispatcharr:${TAG}"
+            IMAGE="ghcr.io/dispatcharr/dispatcharr:${TAG}"
+          fi
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
           if grep -qx 'pyproject.toml' /tmp/changed_paths.txt || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "sync_python_deps=true" >> "$GITHUB_OUTPUT"
           else
             echo "sync_python_deps=false" >> "$GITHUB_OUTPUT"
           fi
-          echo "Using base image: ghcr.io/${REPO_OWNER}/${REPO_NAME}:${TAG}"
+          echo "Using base image: ${IMAGE}"
 
       - name: Resolve Django test labels
         id: resolve

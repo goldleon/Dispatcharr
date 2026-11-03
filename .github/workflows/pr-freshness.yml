@@ -7,6 +7,8 @@ on:
 
 jobs:
   freshness:
+    # Upstream repo-bot needs Dispatcharr's GitHub App; skip on forks.
+    if: github.repository == 'Dispatcharr/Dispatcharr'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/create-github-app-token@v1

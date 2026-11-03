@@ -117,7 +117,7 @@ jobs:
         with:
           images: |
             ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${{ needs.prepare.outputs.repo_name }}
           labels: |
             org.opencontainers.image.title=${{ needs.prepare.outputs.repo_name }}
             org.opencontainers.image.description=Your ultimate IPTV & stream Management companion.
@@ -142,8 +142,8 @@ jobs:
           tags: |
             ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:latest-${{ matrix.platform }}
             ghcr.io/${{ needs.prepare.outputs.repo_owner }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}-${{ matrix.platform }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}:latest-${{ matrix.platform }}
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}-${{ matrix.platform }}
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${{ needs.prepare.outputs.repo_name }}:latest-${{ matrix.platform }}
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${{ needs.prepare.outputs.repo_name }}:${{ needs.prepare.outputs.new_version }}-${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             REPO_OWNER=${{ needs.prepare.outputs.repo_owner }}
@@ -219,9 +219,9 @@ jobs:
             --annotation "index:org.opencontainers.image.authors=${{ github.actor }}" \
             --annotation "index:maintainer=${{ github.actor }}" \
             --annotation "index:build_version=Dispatcharr version: ${VERSION} Build date: ${TIMESTAMP}" \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:latest \
-            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION} \
-            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION }}/${REPO}:${VERSION}-arm64
+            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:latest \
+            --tag docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${VERSION} \
+            docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${VERSION}-amd64 docker.io/${{ secrets.DOCKERHUB_ORGANIZATION || secrets.DOCKERHUB_USERNAME }}/${REPO}:${VERSION}-arm64
 
   create-release:
     needs: [prepare, create-manifest]

@@ -74,39 +74,6 @@ HBAEOF
         chown "$PUID:$PGID" "${datadir}/postgresql.conf"
     }
 
-    # Tune postgresql.conf for performance and connection capacity.
-    # Set max_connections and shared_buffers based on environment.
-    configure_pg_performance() {
-        local datadir="$1"
-        local max_conn="${POSTGRES_MAX_CONNECTIONS:-200}"
-
-        echo "⚙️ Tuning PostgreSQL performance (max_connections=${max_conn})..."
-
-        # 1. Update max_connections
-        sed -Ei "/^[[:space:]]*max_connections[[:space:]]*=/d" "${datadir}/postgresql.conf"
-        echo "max_connections = ${max_conn}" >> "${datadir}/postgresql.conf"
-
-        # 2. Update performance tunables
-        # These are conservative defaults that can be overridden if needed.
-        # shared_buffers: ~25% of RAM is ideal, but for containerized AIO we stay safe.
-        sed -Ei "/^[[:space:]]*shared_buffers[[:space:]]*=/d" "${datadir}/postgresql.conf"
-        echo "shared_buffers = 128MB" >> "${datadir}/postgresql.conf"
-
-        # work_mem: Memory per-operation. Reduce slightly if connection count is very high.
-        sed -Ei "/^[[:space:]]*work_mem[[:space:]]*=/d" "${datadir}/postgresql.conf"
-        if [ "$max_conn" -gt 500 ]; then
-            echo "work_mem = 2MB" >> "${datadir}/postgresql.conf"
-        else
-            echo "work_mem = 4MB" >> "${datadir}/postgresql.conf"
-        fi
-
-        # effective_cache_size: Hint for query planner.
-        sed -Ei "/^[[:space:]]*effective_cache_size[[:space:]]*=/d" "${datadir}/postgresql.conf"
-        echo "effective_cache_size = 512MB" >> "${datadir}/postgresql.conf"
-
-        chown "$PUID:$PGID" "${datadir}/postgresql.conf"
-    }
-
     # Legacy migration: move data from /data root into $POSTGRES_DIR.
     # Safe to remove once all deployments have upgraded past this layout.
     if [ -e "/data/postgresql.conf" ]; then
@@ -357,7 +324,7 @@ UPGEOF
 
         # Initialize PostgreSQL as the application user.
         # The superuser role is automatically named $POSTGRES_USER.
-        su - "$POSTGRES_USER" -c "$PG_BINDIR/initdb -D ${POSTGRES_DIR}"
+        su - "$POSTGRES_USER" -c "$PG_BINDIR/initdb --encoding=UTF8 --locale=C.UTF-8 -D ${POSTGRES_DIR}"
 
         # Configure authentication and network access.
         configure_pg_network "${POSTGRES_DIR}"
@@ -482,7 +449,7 @@ ensure_app_database() {
     fi
 
     echo "Application database '$POSTGRES_DB' not found — creating..."
-    if ! su - "$POSTGRES_USER" -c "createdb -p ${POSTGRES_PORT} --encoding=UTF8 ${POSTGRES_DB}" 2>/dev/null; then
+    if ! su - "$POSTGRES_USER" -c "createdb -p ${POSTGRES_PORT} --encoding=UTF8 --template=template0 ${POSTGRES_DB}" 2>/dev/null; then
         # Might already exist if the check failed for a transient reason.
         if su - "$POSTGRES_USER" -c "psql -d template1 -p ${POSTGRES_PORT} -tAc \
             \"SELECT 1 FROM pg_database WHERE datname = '$POSTGRES_DB';\"" 2>/dev/null | grep -q 1; then

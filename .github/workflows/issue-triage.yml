@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   triage:
-    if: github.event.label.name == 'Triage'
+    if: github.event.label.name == 'Triage' && github.repository == 'Dispatcharr/Dispatcharr'
     concurrency:
       group: issue-triage-global
       cancel-in-progress: false
