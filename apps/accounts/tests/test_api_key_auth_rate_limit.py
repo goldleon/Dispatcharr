@@ -31,8 +31,10 @@ class ApiKeyFailedAuthRateLimitTests(TestCase):
             username="keyuser",
             password="django-password",
             user_level=10,
-            api_key="valid-test-api-key",
         )
+        # This fork stores API keys hashed; set_api_key() hashes and indexes it.
+        self.user.set_api_key("valid-test-api-key")
+        self.user.save(update_fields=["api_key", "api_key_prefix"])
 
     def tearDown(self):
         cache.clear()
@@ -175,12 +177,14 @@ class ApiKeyAuthLockoutInboxTests(TestCase):
             notification_key=API_KEY_AUTH_LOCKOUT_NOTICE_KEY
         ).delete()
         self.api = APIClient()
-        User.objects.create_user(
+        key_user = User.objects.create_user(
             username="keyuser",
             password="django-password",
             user_level=10,
-            api_key="valid-test-api-key",
         )
+        # This fork stores API keys hashed; set_api_key() hashes and indexes it.
+        key_user.set_api_key("valid-test-api-key")
+        key_user.save(update_fields=["api_key", "api_key_prefix"])
         self.admin = User.objects.create_superuser(
             username="notify-admin",
             password="admin-password",

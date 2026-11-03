@@ -60,8 +60,10 @@ class UserAppDataEndpointTests(TestCase):
             username="viewer",
             password="testpass123",
             user_level=User.UserLevel.STANDARD,
-            api_key="viewer-api-key",
         )
+        # This fork stores API keys hashed; set_api_key() hashes and indexes it.
+        self.user.set_api_key("viewer-api-key")
+        self.user.save(update_fields=["api_key", "api_key_prefix"])
         self.streamer = User.objects.create_user(
             username="streamer",
             password="testpass123",
