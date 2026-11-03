@@ -1062,6 +1062,16 @@ class TestStreamSetupCreateRaceAndIdleGuard(TestCase):
         create.assert_not_called()
 
 
+# This fork releases the request's DB connection with close_old_connections()
+# when the streaming response is built. Inside a TestCase transaction that
+# closes the test's own connection, so stub it for these DB-backed tests.
+_keep_test_db_connection = patch(
+    "apps.proxy.vod_proxy.multi_worker_connection_manager.close_old_connections",
+    new=lambda: None,
+)
+
+
+@_keep_test_db_connection
 class TestIdleMatchAcrossDifferentProfile(TestCase):
     """find_matching_idle_session doesn't filter by profile, and the view
     re-selects a profile per request based on current capacity/priority, so
@@ -1496,6 +1506,7 @@ class TestCreateRaceBindsStoredProfile(TestCase):
         )
 
 
+@_keep_test_db_connection
 class TestMidStreamUpstreamRetry(TestCase):
     """Transparent Range reopen when upstream stalls mid-body."""
 
@@ -1748,6 +1759,7 @@ class _InlineThread:
         self._target(*self._args, **self._kwargs)
 
 
+@_keep_test_db_connection
 class ResponseCloseBeforeBodyTests(TestCase):
     """Closing a response whose body never started must drop its active_streams.
 

@@ -62,15 +62,17 @@ class StreamManagerShutdownTests(TestCase):
         )
 
     def test_stop_cleans_up_without_writing_error_or_stopping_key(self):
-        timer = Mock()
-        self.manager._buffer_check_timers.append(timer)
+        # This fork runs buffer checks in one greenlet instead of a timer list.
+        greenlet = Mock(dead=False)
+        self.manager._buffer_check_greenlet = greenlet
         self.establish.return_value = True
         with patch.object(self.manager, '_process_stream_data', side_effect=self.manager.stop):
             self.manager.run()
 
         self.assertTrue(self.manager.stop_requested)
-        timer.cancel.assert_called_once_with()
-        self.assertEqual(self.manager._buffer_check_timers, [])
+        # run()'s finally and stop() both kill it; either is enough.
+        greenlet.kill.assert_called_with(block=False)
+        self.assertIsNone(self.manager._buffer_check_greenlet)
         self.assert_no_failure_published()
 
     def test_server_shutdown_signal_does_not_publish_failure(self):

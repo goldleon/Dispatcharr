@@ -857,6 +857,8 @@ class CheckOrphanedMetadataMidInitTests(SimpleTestCase):
 
         redis = MagicMock()
         redis.keys.return_value = [metadata_key]
+        # This fork sweeps with SCAN instead of KEYS.
+        redis.scan.return_value = (0, [metadata_key])
         redis.hgetall.return_value = dict(metadata)
         redis.get.side_effect = lambda key: owner if key == owner_key else None
         redis.exists.side_effect = lambda key: key in heartbeats
