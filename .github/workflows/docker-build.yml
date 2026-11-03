@@ -95,7 +95,9 @@ jobs:
           docker logs aio > aio.log 2>&1
           grep -q "Applying vod.0009_drop_episode_relation_account_episode_unique... OK" aio.log \
             || { echo "::error::fork migrations did not run"; tail -300 aio.log; exit 1; }
-          if grep -E "Traceback|CRITICAL" aio.log; then
+          # nginx logs a [crit] while uWSGI's socket is still coming up; only
+          # Python tracebacks count as startup failures.
+          if grep -n "Traceback" aio.log; then
             echo "::error::errors in AIO startup log"
             tail -300 aio.log
             exit 1

@@ -50,9 +50,7 @@ name = "pytorch-cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = [
-  { index = "pytorch-cpu", marker = "sys_platform != 'darwin'" },
-]
+torch = { index = "pytorch-cpu" }
 
 [tool.hatch.build.targets.wheel]
 packages = ["dispatcharr", "apps", "core"]
