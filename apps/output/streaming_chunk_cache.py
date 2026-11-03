@@ -118,15 +118,17 @@ def _stream_ready(redis, base_key, cache_ttl):
     offset = 0
     batch_size = _READ_BATCH_SIZE
     while True:
-        now = time.monotonic()
-        if now - last_refresh >= refresh_interval:
-            _refresh_ready_ttl(redis, base_key, cache_ttl)
-            last_refresh = now
         # One LRANGE per batch instead of one LINDEX per chunk.
         chunks = redis.lrange(chunks_key, offset, offset + batch_size - 1)
         if not chunks:
             break
         for chunk in chunks:
+            # A slow client can spend longer than the TTL inside one batch,
+            # so the refresh check runs per chunk, not per round trip.
+            now = time.monotonic()
+            if now - last_refresh >= refresh_interval:
+                _refresh_ready_ttl(redis, base_key, cache_ttl)
+                last_refresh = now
             yield _decode_chunk(chunk)
         offset += len(chunks)
         if len(chunks) < batch_size:
@@ -184,11 +186,11 @@ def _stream_follow(redis, base_key, source, cache_ttl, lock_ttl, poll_interval, 
         chunks = redis.lrange(chunks_key, offset, offset + _READ_BATCH_SIZE - 1)
         if chunks:
             idle_polls = 0
-            now = time.monotonic()
-            if now - last_refresh >= refresh_interval:
-                _refresh_ready_ttl(redis, base_key, cache_ttl)
-                last_refresh = now
             for chunk in chunks:
+                now = time.monotonic()
+                if now - last_refresh >= refresh_interval:
+                    _refresh_ready_ttl(redis, base_key, cache_ttl)
+                    last_refresh = now
                 yield _decode_chunk(chunk)
             offset += len(chunks)
             continue

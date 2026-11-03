@@ -1354,6 +1354,9 @@ def process_m3u_batch_direct(account_id, batch, groups, hash_keys, compiled_filt
     """
     from django.db import connections
 
+    # Ensure clean database connections for threading
+    connections.close_all()
+
     account = M3UAccount.objects.select_related("user_agent").get(id=account_id)
 
     if compiled_filters is None:
