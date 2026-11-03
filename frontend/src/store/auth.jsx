@@ -26,12 +26,24 @@ const isTokenExpired = (expirationTime) => {
 
 let refreshPromise = null;
 let logoutPromise = null;
+const storeTokens = (set, response) => {
+  const expiration = decodeToken(response.access);
+  set({
+    accessToken: response.access,
+    refreshToken: response.refresh,
+    tokenExpiration: expiration,
+  });
+  localStorage.setItem('accessToken', response.access);
+  localStorage.setItem('refreshToken', response.refresh);
+  localStorage.setItem('tokenExpiration', expiration);
+};
 
 const useAuthStore = create((set, get) => ({
   isAuthenticated: false,
   isInitialized: false,
   isInitializing: false,
   isCheckingAuth: true,
+  proxyAuthOptOut: false,
   user: {
     username: '',
     email: '',
@@ -183,22 +195,28 @@ const useAuthStore = create((set, get) => ({
     try {
       const response = await API.login(username, password);
       if (response.access) {
-        const expiration = decodeToken(response.access);
-        set({
-          accessToken: response.access,
-          refreshToken: response.refresh,
-          tokenExpiration: expiration, // 1 hour from now
-        });
-        // Store in localStorage
-        localStorage.setItem('accessToken', response.access);
-        localStorage.setItem('refreshToken', response.refresh);
-        localStorage.setItem('tokenExpiration', expiration);
+        set({ proxyAuthOptOut: false });
+        storeTokens(set, response);
 
         // Don't start background loading here - let it happen after app initialization
       }
     } catch (error) {
       console.error('Login failed:', error);
     }
+  },
+
+  proxyLogin: async () => {
+    if (get().proxyAuthOptOut) {
+      return false;
+    }
+
+    const response = await API.proxyLogin();
+    if (!response) {
+      return false;
+    }
+
+    storeTokens(set, response);
+    return true;
   },
 
   // Action to refresh the token
@@ -236,8 +254,15 @@ const useAuthStore = create((set, get) => ({
     return await refreshPromise;
   },
 
-  // Action to logout
-  logout: async () => {
+  // Opting out lasts until the page is reloaded: an explicit logout should show
+  // the login form, but a later visit signs in through the proxy again.
+  // Concurrent calls share one in-flight logout so we never fire cascading
+  // logout requests.
+  logout: async ({ explicit = false } = {}) => {
+    if (explicit) {
+      set({ proxyAuthOptOut: true });
+    }
+
     if (logoutPromise) {
       return await logoutPromise;
     }
@@ -283,7 +308,8 @@ const useAuthStore = create((set, get) => ({
       }
     }
 
-    return false;
+    set({ isCheckingAuth: true });
+    return await get().proxyLogin();
   },
 }));
 

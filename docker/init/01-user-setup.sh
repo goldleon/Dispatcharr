@@ -120,7 +120,7 @@ for device in /dev/dri/renderD*; do
 done
 
 if [ "$FOUND_RENDER_DEVICE" = "false" ]; then
-    echo "Warning: No /dev/dri/renderD* devices found. GPU acceleration may not be available."
+    echo "ℹ️ No /dev/dri/renderD* devices found. GPU acceleration may not be available."
 fi
 
 # Always add user to video group for hardware acceleration if it exists

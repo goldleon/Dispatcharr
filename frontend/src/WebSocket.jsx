@@ -130,7 +130,7 @@ export const WebsocketProvider = ({ children }) => {
 
       // Use the function to get the correct WebSocket URL
       const wsUrl = getWebSocketUrl();
-      console.log(`Connecting to WebSocket at: ${wsUrl}`);
+      console.log(`Connecting to WebSocket at: ${wsUrl.split('?')[0]}`);
 
       // Create new WebSocket connection
       const socket = new WebSocket(wsUrl);
