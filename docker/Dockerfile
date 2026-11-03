@@ -6,7 +6,7 @@ ARG BASE_TAG=base
 
 # --- Build frontend ---
 
-FROM node:24 AS frontend-builder
+FROM --platform=$BUILDPLATFORM node:24 AS frontend-builder
 
 WORKDIR /app/frontend
 COPY ./frontend /app/frontend

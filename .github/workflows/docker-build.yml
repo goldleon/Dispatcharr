@@ -1,13 +1,114 @@
 name: Build and Push Multi-Arch Docker Image
 
+# Fork AIO image: docker.io/goldleon/dispatcharr and ghcr.io/<owner>/dispatcharr.
+# Every run first builds an amd64 image and smoke-tests it (Postgres, Redis,
+# migrations, nginx/uWSGI). The multi-arch push only runs after that passes,
+# and never for pull requests.
+
 on:
   push:
     branches:
       - main
       - dev
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docker/**'
+      - 'frontend/**'
+      - 'apps/**'
+      - 'core/**'
+      - 'dispatcharr/**'
+      - 'pyproject.toml'
+      - 'version.py'
+      - '.github/workflows/docker-build.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Moving tag to publish (the version and commit SHA tags are always published too)'
+        required: true
+        default: 'latest'
+
+concurrency:
+  group: docker-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  smoke-test:
+    name: Build and smoke-test AIO (amd64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build AIO image (amd64, not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: dispatcharr-aio:smoke
+          cache-from: type=gha,scope=aio-amd64
+          cache-to: type=gha,mode=max,scope=aio-amd64
+
+      - name: Start AIO container
+        run: |
+          docker run -d --name aio -p 9191:9191 \
+            -e DISPATCHARR_ENV=aio \
+            -e REDIS_HOST=localhost \
+            -e CELERY_BROKER_URL=redis://localhost:6379/0 \
+            -e DISPATCHARR_LOG_LEVEL=info \
+            dispatcharr-aio:smoke
+
+      - name: Wait for the web UI and API
+        run: |
+          ok=""
+          for i in $(seq 1 120); do
+            if [ "$(docker inspect -f '{{.State.Running}}' aio)" != "true" ]; then
+              echo "::error::AIO container exited during startup"
+              break
+            fi
+            ui=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9191/ || true)
+            api=$(curl -s http://localhost:9191/api/accounts/initialize-superuser/ || true)
+            if [ "$ui" = "200" ] && echo "$api" | grep -q '"superuser_exists"'; then
+              echo "AIO is serving after $((i * 5))s: UI HTTP $ui, API $api"
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$ok" ]; then
+            docker logs aio 2>&1 | tail -300
+            exit 1
+          fi
+
+      - name: Check migrations and startup log
+        run: |
+          docker logs aio > aio.log 2>&1
+          grep -q "Applying vod.0009_drop_episode_relation_account_episode_unique... OK" aio.log \
+            || { echo "::error::fork migrations did not run"; tail -300 aio.log; exit 1; }
+          if grep -E "Traceback|CRITICAL" aio.log; then
+            echo "::error::errors in AIO startup log"
+            tail -300 aio.log
+            exit 1
+          fi
+          echo "Migrations applied and no tracebacks in startup log."
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs aio 2>&1 | tail -500 || true
+
   build-and-push:
+    name: Build and push multi-arch AIO
+    needs: smoke-test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -16,6 +117,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -38,14 +142,17 @@ jobs:
         run: |
           VERSION=$(python3 -c "import sys; sys.path.append('.'); import version; print(version.__version__)")
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "TIMESTAMP=$(date -u +'%Y%m%d%H%M%S')" >> $GITHUB_ENV
 
       - name: Determine image tag and branch
-        id: set-tag-branch
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_ENV
+            echo "BRANCH=${GITHUB_REF_NAME}" >> $GITHUB_ENV
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "TAG=latest" >> $GITHUB_ENV
             echo "BRANCH=main" >> $GITHUB_ENV
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
+          else
             echo "TAG=dev" >> $GITHUB_ENV
             echo "BRANCH=dev" >> $GITHUB_ENV
           fi
@@ -62,9 +169,15 @@ jobs:
           file: docker/Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
+          provenance: false
+          cache-from: |
+            type=gha,scope=aio-amd64
+            type=gha,scope=aio-multi
+          cache-to: type=gha,mode=max,scope=aio-multi
           build-args: |
             BRANCH=${{ env.BRANCH }}
             REPO_URL=https://github.com/${{ github.repository }}
+            TIMESTAMP=${{ env.TIMESTAMP }}
           tags: |
             ghcr.io/${{ env.REPO_NAME }}:${{ env.TAG }}
             ghcr.io/${{ env.REPO_NAME }}:${{ env.VERSION }}
@@ -72,3 +185,8 @@ jobs:
             docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ env.TAG }}
             docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ env.VERSION }}
             docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ github.sha }}
+
+      - name: Verify both architectures were published
+        run: |
+          docker buildx imagetools inspect docker.io/goldleon/${{ env.REPO_NAME_ONLY }}:${{ env.VERSION }} | tee manifest.txt
+          grep -q "linux/amd64" manifest.txt && grep -q "linux/arm64" manifest.txt
