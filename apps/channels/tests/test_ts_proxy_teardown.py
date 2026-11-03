@@ -135,6 +135,9 @@ class ClientManagerAddClientTests(TestCase):
 
         redis = MagicMock()
         cm = ClientManager(CHANNEL_ID, redis_client=redis, worker_id="worker-1")
+        # Stop the real heartbeat thread, or it outlives the test and spins on any
+        # later global time.sleep mock (unbounded mock call recording -> OOM).
+        self.addCleanup(cm.stop)
         cm.proxy_server = MagicMock()
 
         result = cm.add_client(
@@ -568,6 +571,7 @@ class ClientDisconnectOwnershipTests(TestCase):
             redis_client=redis,
             worker_id="testhost:1",
         )
+        self.addCleanup(manager.stop)
         manager.proxy_server = proxy_server
         manager.clients = {"client-1"}
         manager.client_set_key = RedisKeys.clients(CHANNEL_ID)
