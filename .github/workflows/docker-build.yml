@@ -61,6 +61,7 @@ jobs:
       - name: Start AIO container
         run: |
           docker run -d --name aio -p 9191:9191 \
+            -v dispatcharr_smoke_data:/data \
             -e DISPATCHARR_ENV=aio \
             -e REDIS_HOST=localhost \
             -e CELERY_BROKER_URL=redis://localhost:6379/0 \

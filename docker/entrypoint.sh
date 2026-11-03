@@ -153,6 +153,8 @@ export DISPATCHARR_PORT=${DISPATCHARR_PORT:-9191}
 export LIBVA_DRIVERS_PATH='/usr/local/lib/x86_64-linux-gnu/dri'
 export LD_LIBRARY_PATH='/usr/local/lib'
 export SECRET_FILE="/data/jwt"
+# /data is normally a volume; create it so a run without one still starts.
+mkdir -p "$(dirname "$SECRET_FILE")"
 # Ensure Django secret key exists or generate a new one
 if [ ! -f "$SECRET_FILE" ]; then
   echo "Generating new Django secret key..."
