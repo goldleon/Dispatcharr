@@ -538,7 +538,6 @@ class StreamManager:
 
     def run(self):
         """Main execution loop using HTTP streaming with improved connection handling and stream switching"""
-        from django.db import connection
         # Add a stop flag to the class properties
         self.stop_requested = False
         # Add tracking for stream switching attempts
@@ -1075,10 +1074,10 @@ class StreamManager:
 
     def _read_stderr(self):
         """Read and log ffmpeg stderr output with real-time stats parsing"""
+        from django.db import connection
         import os as _os
         import select as _select
         import gevent
-        from django.db import connection
 
         try:
             stderr = self.transcode_process.stderr
@@ -1658,7 +1657,6 @@ class StreamManager:
 
         logger.info(f"Switching stream URL from {self.url} to {new_url} for channel {self.channel_id}")
 
-        from django.db import connection
 
         # Update stream profile if we're switching streams
         if self.current_stream_id and stream_id and self.current_stream_id != stream_id:
@@ -1859,7 +1857,6 @@ class StreamManager:
 
     def _monitor_health(self):
         """Monitor stream health and set flags for the main loop to handle recovery"""
-        from django.db import connection
         consecutive_unhealthy_checks = 0
         max_unhealthy_checks = 3
         action_cooldown = 30  # Prevent rapid recovery attempts

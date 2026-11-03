@@ -843,8 +843,6 @@ class ProxyServer:
             buffer = StreamBuffer(channel_id=channel_id, redis_client=RedisClient.get_buffer())
             logger.debug(f"Created StreamBuffer for channel {channel_id}")
             self.stream_buffers[channel_id] = buffer
-            from apps.proxy.live_proxy.cache import get_channel_name
-            channel_name = get_channel_name(channel_id)
 
             # Only the owner worker creates the actual stream manager
             stream_manager = StreamManager(
